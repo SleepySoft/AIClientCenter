@@ -351,9 +351,9 @@ class BaseAIClient(ABC):
             error_category = 'recoverable'
             logger.warning(f"Unknown API error type: {error_type}, message: {error_message}")
 
-        if error_type == 'recoverable':
+        if error_category == 'recoverable':
             self._update_client_status(ClientStatus.ERROR)
-        elif error_type == 'fatal':
+        elif error_category == 'fatal':
             self._update_client_status(ClientStatus.UNAVAILABLE)
         self._increase_error_count()
 
