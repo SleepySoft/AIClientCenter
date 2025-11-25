@@ -876,7 +876,7 @@ class AIClientManager:
             return
 
         self.monitor_running = True
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.monitor_thread = threading.Thread(name='AIClientManager Monitoring', target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         logger.info("Started AI client monitoring")
 
