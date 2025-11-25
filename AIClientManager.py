@@ -456,16 +456,6 @@ class BaseAIClient(ABC):
     # ---------------------------------------- Abstractmethod ----------------------------------------
 
     @abstractmethod
-    def get_usage_metrics(self) -> Dict[str, float]:
-        """
-        Get usage metrics and return the most critical remaining percentage.
-
-        Returns:
-            Dict with usage metrics including 'remaining_percentage' (0-100)
-        """
-        pass
-
-    @abstractmethod
     def get_model_list(self) -> Dict[str, Any]:
         pass
 

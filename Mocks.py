@@ -256,13 +256,6 @@ class AdvancedMockAIClient(BaseAIClient):
     # ------------------------------------------------------------------
     # Interface Implementation
     # ------------------------------------------------------------------
-    def get_usage_metrics(self) -> Dict[str, float]:
-        # 计算剩余配额百分比
-        # 假设初始配额是 100刀，当前余额在 config.simulated_balance
-        initial = 100.0
-        remaining = max(0, self.config.simulated_balance)
-        pct = (remaining / initial) * 100.0
-        return {"remaining_percentage": pct, "balance": remaining}
 
     def get_model_list(self) -> Dict[str, Any]:
         return {"data": [{"id": self.config.model_name}]}

@@ -16,7 +16,7 @@ from OpenAICompatibleAPI import OpenAICompatibleAPI
 from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
 
 
-class OpenAIClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
+class OpenAIRotationClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
     def __init__(
             self,
             name: str,
@@ -42,22 +42,19 @@ class OpenAIClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
         )
 
         self.api = openai_api
+
+        self._rotation_models = []
+        self._rotate_per_times = 1
+        self._current_model_idx = 0
+        self._current_model_uses = 0
+
         if default_available:
             self._status['status'] = ClientStatus.AVAILABLE
+
 
     # ------------------------------------------------- Overrides -------------------------------------------------
 
     # ------------------ BaseAIClient ------------------
-
-    @override
-    def get_usage_metrics(self) -> Dict[str, float]:
-        """
-        Get usage metrics and return the most critical remaining percentage.
-
-        Returns:
-            Dict with usage metrics including 'remaining_percentage' (0-100)
-        """
-        pass
 
     @override
     def get_model_list(self) -> Dict[str, Any]:
@@ -69,7 +66,12 @@ class OpenAIClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
                               model: Optional[str] = None,
                               temperature: float = 0.7,
                               max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
-        return self.api.create_chat_completion_sync(messages, model, temperature, max_tokens)
+        return self.api.create_chat_completion_sync(
+            messages=messages,
+            model=self._get_next_model() or model,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
 
     # ------------------ RotatableClient ------------------
 
@@ -83,3 +85,20 @@ class OpenAIClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
     def update_token_balance(self, token: str, balance: float):
         if token == self.api_token:
             self.update_balance(balance)
+
+    # ------------------ Model Rotation ------------------
+
+    def set_rotation_models(self, models: List[str], rotate_per_times: int = 1):
+        self._rotation_models = models
+        self._rotate_per_times = rotate_per_times
+
+    def _get_next_model(self) -> Optional[str]:
+        if not self._rotation_models:
+            # Return None to use API default module
+            return None
+        if self._current_model_uses >= self._rotate_per_times:
+            self._current_model_idx += 1
+            self._current_model_idx %= len(self._rotation_models)
+            self._current_model_uses = 0
+        self._current_model_uses += 1
+        return self._rotation_models[self._current_model_idx]
