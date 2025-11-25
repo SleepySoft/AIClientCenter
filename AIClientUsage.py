@@ -214,12 +214,8 @@ def main():
 
     ms_models = [
         'deepseek-ai/DeepSeek-R1-0528',
-        # 'deepseek-ai/DeepSeek-V3-0324',
         'deepseek-ai/DeepSeek-V3.2-Exp',
-        'Qwen/Qwen3-Coder-480B-A35B-Instruct',
-        # 'moonshotai/Kimi-K2-Base',
-        # 'moonshotai/Kimi-K2-Instruct-0905',
-        # 'moonshotai/Kimi-K2-Instruct'
+        'Qwen/Qwen3-Coder-480B-A35B-Instruct'
     ]
 
     ms_api = create_modelscope_client('ms-0657d62b-eaac-4ce5-a14d-f6f5106ad983')
