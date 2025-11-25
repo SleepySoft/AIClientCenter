@@ -131,6 +131,67 @@ class BaseAIClient(ABC):
         with self._lock:
             return self._status.get(key, None) if key else self._status.copy()
 
+    def validate_response(self, response: Dict[str, Any], expected_content: Optional[str] = None) -> Optional[str]:
+        """
+        验证 Chat 响应的内容是否合法。
+        用于业务层检查，或者 _test_and_update_status 内部检查。
+
+        Usage:
+            if error := client.validate_response(response, expected_content="JSON"):
+                client.complain_error(error)
+                print(f"Client {client.name} failed: {error}")
+                # 触发重试逻辑...
+            else:
+                print("Success:", response['choices'][0]['message']['content'])
+
+        Args:
+            response: chat() 方法返回的字典
+            expected_content: (可选) 期望在响应中出现的字符串，用于简单的关键词验证
+
+        Returns:
+            Optional[str]: 如果验证通过返回 None；如果不通过，返回错误原因字符串。
+                           返回值可以直接传给 complain_error()。
+        """
+        # 1. 检查底层是否已经报错 (由 chat 内部捕获的)
+        if 'error' in response:
+            # 注意：chat 内部已经计过一次 error_count 了
+            # 但如果用户显式调用 validate 并 complain，说明这对业务影响很大，再次计分也是允许的
+            return f"API Internal Error: {response['message']}"
+
+        # 2. 检查基本结构 (choices)
+        choices = response.get('choices', [])
+        if not choices:
+            return "Invalid response structure: 'choices' is empty"
+
+        # 3. 检查内容是否为空
+        first_content = choices[0].get('message', {}).get('content', '')
+        if not first_content:
+            return "Response content is empty"
+
+        # 4. (可选) 检查业务关键词
+        if expected_content and expected_content not in first_content:
+            return f"Content validation failed: '{expected_content}' not found in response"
+
+        # 5. (可选) 可以在这里检查 finish_reason，如果业务非常严格的话
+        # finish_reason = choices[0].get('finish_reason')
+        # if finish_reason == 'length':
+        #     return "Response truncated (length limit)"
+
+        return None  # 一切正常
+
+    def complain_error(self, reason: str = "Unspecified external error"):
+        """
+        外部主动报错接口。
+        用于当 API 调用成功(HTTP 200)，但返回内容不符合预期（如逻辑错误、格式错误）时，
+        由上层调用者手动标记此 Client 为不健康。
+        """
+        logger.warning(f"Client {self.name} received external complaint: {reason}")
+
+        # 既然外部认为由于这个 Client 的原因导致任务失败，
+        # 我们就应当增加错误计数，并将其标记为 ERROR，使其暂停接客或降低权重。
+        self._increase_error_count()
+        self._update_client_status(ClientStatus.ERROR)
+
     # =========================================================================
     # Metrics & Health Interface (Stubs)
     # =========================================================================
@@ -230,40 +291,39 @@ class BaseAIClient(ABC):
 
     def _test_and_update_status(self) -> bool:
         """
-        Test client connectivity and update status.
-        Called periodically by the management framework.
-
-        Returns:
-            bool: True if test was successfully completed.
+        Refactored: Uses validate_response to standardize health checks.
         """
         try:
+            # 1. 发起测试对话
+            # chat() 内部处理网络层面的 Available/Error 状态切换
             result = self.chat(
                 messages=[{"role": "user", "content": self.test_prompt}],
                 max_tokens=100
             )
-            if 'error' in result:
+
+            # 2. 验证响应逻辑
+            # 直接使用公共的验证函数
+            error_reason = self.validate_response(result, expected_content=self.expected_response)
+
+            if error_reason:
+                # 3. 如果有错，进行投诉
+                # 这会增加 error_count 并将状态设为 ERROR
+                self.complain_error(f"Self-test failed: {error_reason}")
                 return False
 
-            if (isinstance(result, dict) and
-                    result.get('choices') and
-                    len(result['choices']) > 0):
+            # 4. 验证通过
+            # chat() 成功时会重置 count，但这里显式确认一下也好，或者完全依赖 chat 的重置
+            # 建议：如果 validate_response 没问题，说明这是一个高质量的 Available
+            self._reset_error_count()
+            self._update_client_status(ClientStatus.AVAILABLE)
+            return True
 
-                content = result['choices'][0].get('message', {}).get('content', '')
-                if self.expected_response in content:
-                    self._reset_error_count()
-                    self._update_client_status(ClientStatus.AVAILABLE)
-                    return True
-
-            self._increase_error_count()
-            self._update_client_status(ClientStatus.ERROR)
         except Exception as e:
-            logger.warning(f"Client test failed for {self.name}: {e}")
-            print(traceback.format_exc())
-            self._increase_error_count()
-            self._update_client_status(ClientStatus.ERROR)
+            self.complain_error(f"Exception during self-test: {e}")
+            return False
         finally:
-            self._status['last_test'] = time.time()
-        return False
+            with self._lock:
+                self._status['last_test'] = time.time()
 
     def _reset_error_count(self):
         with self._lock:
@@ -283,8 +343,23 @@ class BaseAIClient(ABC):
             if old_status != new_status:
                 logger.info(f"Client {self.name} status changed from {old_status} to {new_status}")
 
+    # ---------------------------------------- Error Handling ----------------------------------------
+
     def _handle_http_error(self, response) -> Dict[str, Any]:
         """处理HTTP错误状态码"""
+
+        # --- 新增逻辑：尝试从 Body 中通过 API Error 逻辑判断是否 Fatal ---
+        try:
+            error_json = response.json()
+            # 如果能解析出 JSON，且里面有 error 字段，直接转交给 handle_api_error 处理
+            # 因为 handle_api_error 里的分类更精准 (比如区分了 Quota 和 RateLimit)
+            if isinstance(error_json, dict) and 'error' in error_json:
+                logger.info(f"Delegating HTTP {response.status_code} to API error handler")
+                return self._handle_api_error(error_json)
+        except Exception:
+            # 解析失败，说明不是标准的 JSON 错误响应，继续走下面的 HTTP 状态码判断
+            pass
+
         # 根据状态码分类错误类型
         if response.status_code in [400, 422]:
             # 错误请求 - 通常是参数错误，可能是可恢复的
@@ -411,6 +486,9 @@ class BaseAIClient(ABC):
         try:
             choices = response.get('choices', [])
             if not choices:
+                # 这是一个真正的 API 错误（协议层）
+                self._increase_error_count()
+                self._update_client_status(ClientStatus.ERROR)
                 return {
                     'error': 'empty_response',
                     'error_type': 'recoverable',
@@ -420,30 +498,24 @@ class BaseAIClient(ABC):
             first_choice = choices[0]
             finish_reason = first_choice.get('finish_reason')
 
-            # 检查完成原因是否表示错误
-            if finish_reason in ['length', 'content_filter']:
-                error_type = 'recoverable'
-                logger.warning(f"LLM response truncated due to: {finish_reason}")
-                self._increase_error_count()
+            # 'length' (达到max_tokens) 和 'content_filter' (内容审查)
+            # 是 API 正常工作的表现，不应计入 Client 的 error_count。
+            if finish_reason == 'length':
+                logger.warning(f"Client {self.name}: Response truncated due to length.")
+                # 这是一个 Warning，不是 Error，不要调用 _increase_error_count
 
-                return {
-                    'error': 'llm_generation_issue',
-                    'error_type': error_type,
-                    'finish_reason': finish_reason,
-                    'message': f"Response generation issue: {finish_reason}",
-                    'choices': choices  # 仍然返回部分结果
-                }
+            elif finish_reason == 'content_filter':
+                logger.warning(f"Client {self.name}: Response triggered content filter.")
 
             try:
                 # 统计token使用量
                 if usage_data := response.get('usage', {}):
                     usage_data['request_count'] = 1
                     self.record_usage(usage_data)
-            except Exception as e:
-                # Maybe not support.
+            except Exception:
                 pass
 
-            # 重置错误计数（成功请求）
+            # 只要能正常解析出 choices，就认为 Client 是健康的
             self._reset_error_count()
             self._update_client_status(ClientStatus.AVAILABLE)
 
@@ -451,6 +523,9 @@ class BaseAIClient(ABC):
 
         except Exception as e:
             logger.error(f"Error processing LLM response: {e}")
+            # 解析过程崩了，可能是数据结构变了，算作错误
+            self._increase_error_count()
+            self._update_client_status(ClientStatus.ERROR)
             return {
                 'error': 'response_processing_error',
                 'error_type': 'recoverable',
