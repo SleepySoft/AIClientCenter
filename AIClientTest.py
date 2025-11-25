@@ -9,8 +9,12 @@ from unittest.mock import MagicMock, patch
 self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
-from AIClientManager import AIClientManager, ClientStatus
-from ArtificialPuppetBackend import AdvancedMockAIClient, MockBehaviorConfig, MockErrorType
+try:
+    from .AIClientManager import AIClientManager, ClientStatus
+    from .ArtificialPuppetBackend import AdvancedMockAIClient, MockBehaviorConfig, MockErrorType
+except ImportError:
+    from AIClientManager import AIClientManager, ClientStatus
+    from ArtificialPuppetBackend import AdvancedMockAIClient, MockBehaviorConfig, MockErrorType
 
 
 # 测试覆盖率：

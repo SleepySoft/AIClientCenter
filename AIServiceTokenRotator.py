@@ -7,10 +7,10 @@ import threading
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod
 
-self_path = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(self_path)
-
-from AiServiceBalanceQuery import get_siliconflow_balance
+try:
+    from .AiServiceBalanceQuery import get_siliconflow_balance
+except ImportError:
+    from AiServiceBalanceQuery import get_siliconflow_balance
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,8 @@ class SiliconFlowServiceRotator:
                             logger.info(f"Added new key from file: {key[:16]}...")
             except Exception as e:
                 logger.error(f'Unexpected error when loading {self.keys_file}: {e}')
+        else:
+            logger.error(f"Key file {self.keys_file} does not exist.")
 
         if has_update:
             self._save_key_records()

@@ -1,19 +1,20 @@
 # AI clients that matches BaseAIClient
-import os
-import sys
-from typing import Dict, List, Optional, Any, Union
 
 import requests
 from typing_extensions import override
+from typing import Dict, List, Optional, Any, Union
 
+try:
+    from .LimitMixins import ClientMetricsMixin
+    from .AIServiceTokenRotator import RotatableClient
+    from .OpenAICompatibleAPI import OpenAICompatibleAPI
+    from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
 
-self_path = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(self_path)
-
-from LimitMixins import ClientMetricsMixin
-from AIServiceTokenRotator import RotatableClient
-from OpenAICompatibleAPI import OpenAICompatibleAPI
-from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
+except ImportError:
+    from LimitMixins import ClientMetricsMixin
+    from AIServiceTokenRotator import RotatableClient
+    from OpenAICompatibleAPI import OpenAICompatibleAPI
+    from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
 
 
 class OpenAIRotationClient(ClientMetricsMixin, BaseAIClient, RotatableClient):

@@ -11,10 +11,16 @@ from concurrent.futures import ThreadPoolExecutor
 self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
-from AIClients import OpenAIRotationClient
-from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
-from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
-from AIServiceTokenRotator import SiliconFlowServiceRotator
+try:
+    from .AIClients import OpenAIRotationClient
+    from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
+    from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
+    from .AIServiceTokenRotator import SiliconFlowServiceRotator
+except ImportError:
+    from AIClients import OpenAIRotationClient
+    from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
+    from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
+    from AIServiceTokenRotator import SiliconFlowServiceRotator
 
 
 # 1. 定义彩色格式

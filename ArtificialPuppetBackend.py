@@ -8,8 +8,12 @@ import logging
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Dict, List, Optional, Any
-
 from flask import Flask, jsonify, request, render_template
+
+try:
+    from .AiServiceBalanceQuery import get_siliconflow_balance
+except ImportError:
+    from AiServiceBalanceQuery import get_siliconflow_balance
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -21,12 +25,6 @@ logger = logging.getLogger("AI-Emulator")
 # =============================================================================
 # 1. Models & Enums
 # =============================================================================
-
-class ClientStatus(Enum):
-    AVAILABLE = "available"
-    ERROR = "error"
-    UNAVAILABLE = "unavailable"
-
 
 class MockErrorType(str, Enum):
     NONE = "none"

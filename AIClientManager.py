@@ -32,6 +32,10 @@ class ClientStatus(Enum):
     ERROR = "error"
     UNAVAILABLE = "unavailable"
 
+    @classmethod
+    def _missing_(cls, value):
+        return cls.ERROR
+
 
 class BaseAIClient(ABC):
     """
@@ -539,7 +543,7 @@ class AIClientManager:
 
             # If the current client is effectively dead/removed, treat user as having no client
             if current_client and (current_client not in self.clients or
-                                   current_client.get_status('status') == ClientStatus.UNAVAILABLE):
+                                   current_client.get_status('status') in [ClientStatus.ERROR, ClientStatus.UNAVAILABLE]):
                 self._release_user_resources(user_name)
                 current_client = None
 
@@ -669,7 +673,7 @@ class AIClientManager:
                         "status": client.get_status('status'),
                         "is_busy": client._is_busy(),
                         "health_score": health_score,
-                        "last_active_ts": raw_status.get('status_last_updated', 0),
+                        "last_active_ts": raw_status.get('status_last_updated', 0.0),
                     },
                     "allocation": {
                         "held_by": allocation['user'] if allocation else None,
@@ -853,12 +857,19 @@ class AIClientManager:
 
                 # Determine timeout based on current status
                 timeout = {
-                    ClientStatus.UNKNOWN : 0,
-                    ClientStatus.AVAILABLE : self.check_stable_interval,
+                    ClientStatus.UNKNOWN.value :    0,
+                    ClientStatus.AVAILABLE.value :  self.check_stable_interval,
                     # Just treat error and fatal as the same.
-                    ClientStatus.ERROR: adjusted_error_interval,
-                    ClientStatus.UNAVAILABLE: adjusted_error_interval,
-                }.get(client_status, ClientStatus.ERROR)
+                    ClientStatus.ERROR.value:       adjusted_error_interval,
+                    ClientStatus.UNAVAILABLE.value: adjusted_error_interval,
+                }.get(client_status.value, adjusted_error_interval)
+
+                # print(f"client_status 的类 ID: {id(client_status.__class__)}")
+                # print(f"ClientStatus 类的 ID: {id(ClientStatus)}")
+                # print(f"是否同一个类: {client_status.__class__ is ClientStatus}")
+                #
+                # print(f"client_status 所属的模块: {client_status.__class__.__module__}")
+                # print(f"ClientStatus 所属的模块: {ClientStatus.__module__}")
 
                 if time.time() - status_last_updated > timeout:
                     clients_to_check.append(client)
