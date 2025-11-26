@@ -79,6 +79,7 @@ class BaseAIClient(ABC):
             'last_test': 0.0,
             'acquire_count': 0,
             'error_count': 0,
+            'error_sum': 0,
             'in_use': False,
             'acquired': False
         }
@@ -301,6 +302,10 @@ class BaseAIClient(ABC):
                 max_tokens=100
             )
 
+            if 'error' in result:
+                # Error count is handled by chat.
+                return False
+
             # 2. 验证响应逻辑
             # 直接使用公共的验证函数
             error_reason = self.validate_response(result, expected_content=self.expected_response)
@@ -332,6 +337,7 @@ class BaseAIClient(ABC):
     def _increase_error_count(self):
         with self._lock:
             self._status['error_count'] += 1
+            self._status['error_sum'] += 1
 
     def _update_client_status(self, new_status: ClientStatus):
         """Update client status with thread safety."""
@@ -636,6 +642,8 @@ class AIClientManager:
 
                 # 1. Filter out permanently dead clients
                 if client_status == ClientStatus.UNAVAILABLE: continue
+                # TODO: Set an error threshold to not select this client.
+                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 2: continue
 
                 # 2. Check dynamic health (Optional optimization)
                 if client.calculate_health() <= 0:
@@ -744,7 +752,8 @@ class AIClientManager:
                 # 2. Error Rate
                 total_ops = raw_status.get('acquire_count', 0)
                 err_count = raw_status.get('error_count', 0)
-                err_rate = (err_count / total_ops * 100) if total_ops > 0 else 0.0
+                err_sum = raw_status.get('error_sum', 0)
+                err_rate = (err_sum / total_ops * 100) if total_ops > 0 else 0.0
 
                 client_details.append({
                     "meta": {
@@ -766,6 +775,7 @@ class AIClientManager:
                     "runtime_stats": {
                         "acquire_count": total_ops,
                         "error_count": err_count,
+                        "error_sum": err_sum,
                         "error_rate_percent": round(err_rate, 1),
                         "last_chat_ts": raw_status.get('last_chat', 0),
                     },
