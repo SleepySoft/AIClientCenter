@@ -756,7 +756,7 @@ class AIClientManager:
                 chat_count = raw_status.get('chat_count', 0)
                 err_count = raw_status.get('error_count', 0)
                 err_sum = raw_status.get('error_sum', 0)
-                err_rate = (err_sum / total_ops * 100) if total_ops > 0 else 0.0
+                err_rate = (err_sum / chat_count * 100) if chat_count > 0 else 0.0
 
                 client_details.append({
                     "meta": {
