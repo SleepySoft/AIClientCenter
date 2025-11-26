@@ -62,6 +62,10 @@ class OpenAIRotationClient(ClientMetricsMixin, BaseAIClient, RotatableClient):
         return self.api.get_model_list()
 
     @override
+    def get_current_model(self) -> str:
+        return self.api.get_using_model()
+
+    @override
     def _chat_completion_sync(self,
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,

@@ -539,6 +539,14 @@ class BaseAIClient(ABC):
         pass
 
     @abstractmethod
+    def get_current_model(self) -> str:
+        """
+        Return the name of the model currently being used.
+        Subclasses should override this if they support multiple models or rotation.
+        """
+        pass
+
+    @abstractmethod
     def _chat_completion_sync(self,
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
@@ -783,6 +791,44 @@ class AIClientManager:
                 },
                 "clients": client_details
             }
+
+    def get_client_by_name(self, name: str) -> Optional[BaseAIClient]:
+        """Helper to find a client by name."""
+        with self._lock:
+            return next((c for c in self.clients if getattr(c, 'name', '') == name), None)
+
+    def trigger_manual_check(self, client_name: str) -> bool:
+        """
+        Manually trigger a health check for a specific client.
+        Thread-safe wrapper around the private check logic.
+        """
+        client = self.get_client_by_name(client_name)
+        if not client:
+            return False
+
+        logger.info(f"Manual check triggered for {client_name}")
+        # 尝试获取锁并执行检查
+        if client._acquire():
+            try:
+                return client._test_and_update_status()
+            finally:
+                client._release()
+        else:
+            logger.warning(f"Could not acquire lock for {client_name} manual check")
+            return False
+
+    def set_client_status(self, client_name: str, status: ClientStatus) -> bool:
+        """
+        Manually force a status change for a client.
+        """
+        client = self.get_client_by_name(client_name)
+        if not client:
+            return False
+
+        client._update_client_status(status)
+        if status == ClientStatus.AVAILABLE:
+            client._reset_error_count()
+        return True
 
     @staticmethod
     def format_stats_report(stats_data: Dict[str, Any]) -> str:

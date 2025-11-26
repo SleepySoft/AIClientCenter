@@ -132,6 +132,7 @@ class OpenAICompatibleAPI:
         self._api_token = token or os.getenv("OPENAI_API_KEY")
 
         self.default_model = default_model
+        self.using_model = default_model
         self.proxies = proxies or {}
 
         # This lock protects self.api_token, which is read by both sync and async methods
@@ -193,8 +194,9 @@ class OpenAICompatibleAPI:
         Returns:
             Dict[str, Any]: Prepared request data.
         """
+        self.using_model = model or self.default_model
         request_data = {
-            "model": model or self.default_model,
+            "model": self.using_model,
             **kwargs
         }
 
@@ -256,6 +258,8 @@ class OpenAICompatibleAPI:
             logger.error(f"Max retries exceeded for get_model_list: {e}")
             return {'error': f'Max retries reached. Last error: {str(e)}'}
 
+    def get_using_model(self) -> str:
+        return self.using_model
 
     def create_chat_completion_sync(self,
                                     messages: List[Dict[str, str]],
@@ -284,7 +288,7 @@ class OpenAICompatibleAPI:
 
         url = self._construct_url("chat/completions")
         data = self._prepare_request_data(
-            model=model or self.default_model,
+            model=model ,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens
@@ -343,7 +347,7 @@ class OpenAICompatibleAPI:
 
         url = self._construct_url("chat/completions")
         data = self._prepare_request_data(
-            model=model or self.default_model,
+            model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens
@@ -386,7 +390,7 @@ class OpenAICompatibleAPI:
 
         url = self._construct_url("completions")
         data = self._prepare_request_data(
-            model=model or self.default_model,
+            model=model,
             prompt=prompt,
             temperature=temperature,
             max_tokens=max_tokens
@@ -442,7 +446,7 @@ class OpenAICompatibleAPI:
 
         url = self._construct_url("completions")
         data = self._prepare_request_data(
-            model=model or self.default_model,
+            model=model,
             prompt=prompt,
             temperature=temperature,
             max_tokens=max_tokens

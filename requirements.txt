@@ -4,3 +4,7 @@ aiohttp
 pytest
 backoff
 typing-extensions
+
+fastapi
+uvicorn
+jinja2
