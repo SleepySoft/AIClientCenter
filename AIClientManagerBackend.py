@@ -148,7 +148,7 @@ FRONTEND_HTML = r"""
                         <!-- Runtime Stats -->
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             <div class="flex flex-col space-y-1">
-                                <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.acquire_count }}</b></span>
+                                <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.chat_count }}</b></span>
                                 <span class="text-gray-600">Errors: <b :class="{'text-red-600': client.runtime_stats.error_sum > 0}">{{ client.runtime_stats.error_sum }}</b></span>
                                 <span class="text-gray-400">Rate: {{ client.runtime_stats.error_rate_percent }}%</span>
                             </div>

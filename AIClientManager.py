@@ -78,6 +78,7 @@ class BaseAIClient(ABC):
             'last_chat': 0.0,
             'last_test': 0.0,
             'acquire_count': 0,
+            'chat_count': 0,
             'error_count': 0,
             'error_sum': 0,
             'in_use': False,
@@ -101,6 +102,7 @@ class BaseAIClient(ABC):
             if self._status['in_use']:
                 return {'error': 'client_busy', 'message': 'Client is busy (in use).'}
             self._status['in_use'] = True
+            self._status['chat_count'] += 1
 
         try:
             response = self._chat_completion_sync(messages, model, temperature, max_tokens)
@@ -750,7 +752,8 @@ class AIClientManager:
                     duration = now - raw_status['last_released']
 
                 # 2. Error Rate
-                total_ops = raw_status.get('acquire_count', 0)
+                acquire_count = raw_status.get('acquire_count', 0)
+                chat_count = raw_status.get('chat_count', 0)
                 err_count = raw_status.get('error_count', 0)
                 err_sum = raw_status.get('error_sum', 0)
                 err_rate = (err_sum / total_ops * 100) if total_ops > 0 else 0.0
@@ -773,7 +776,8 @@ class AIClientManager:
                         "duration_seconds": duration if allocation else 0
                     },
                     "runtime_stats": {
-                        "acquire_count": total_ops,
+                        "acquire_count": acquire_count,
+                        "chat_count": chat_count,
                         "error_count": err_count,
                         "error_sum": err_sum,
                         "error_rate_percent": round(err_rate, 1),

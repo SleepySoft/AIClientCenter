@@ -65,7 +65,7 @@ RETRYABLE_ASYNC_EXCEPTIONS = (
 )
 
 
-LLM_DEFAULT_TIMEOUT_S = 10 * 60
+LLM_DEFAULT_TIMEOUT_S = 5 * 60
 
 
 def is_retryable_async_error(e: Exception) -> bool:
