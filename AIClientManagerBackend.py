@@ -24,9 +24,11 @@ FRONTEND_HTML = r"""
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Client Manager</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
     <style>
         .progress-bar { transition: width 0.5s ease; }
         [v-cloak] { display: none; }
@@ -149,6 +151,15 @@ FRONTEND_HTML = r"""
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             <div class="flex flex-col space-y-1">
                                 <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.chat_count }}</b></span>
+
+                                <span class="text-gray-600">
+                                    Heat: 
+                                    <b :class="getHeatClass(client.runtime_stats.error_count)">
+                                        <i v-if="client.runtime_stats.error_count > 0" class="fa-solid fa-fire text-[10px] ml-1"></i>
+                                        {{ client.runtime_stats.error_count || 0 }}
+                                    </b>
+                                </span>
+
                                 <span class="text-gray-600">Errors: <b :class="{'text-red-600': client.runtime_stats.error_sum > 0}">{{ client.runtime_stats.error_sum }}</b></span>
                                 <span class="text-gray-400">Rate: {{ client.runtime_stats.error_rate_percent }}%</span>
                             </div>
@@ -204,6 +215,11 @@ FRONTEND_HTML = r"""
                     });
                     setTimeout(this.fetchData, 500);
                 } catch (e) { alert("Action failed"); }
+            },
+            getHeatClass(heat) {
+                if (!heat || heat === 0) return 'text-gray-400 font-normal'; // 无热度，灰色
+                if (heat < 3) return 'text-orange-500 font-bold';            // 低热度 (1-2次)，橙色
+                return 'text-red-600 font-bold animate-pulse';               // 高热度 (3次+)，红色且闪烁
             },
             formatStatus(s) { return s.split('.').pop(); },
             getStatusBadgeClass(c) { const s = String(c.state.status); if (s.includes('AVAILABLE')) return 'bg-green-100 text-green-800'; if (s.includes('ERROR')) return 'bg-red-100 text-red-800'; if (s.includes('UNAVAILABLE')) return 'bg-gray-100 text-gray-800'; return 'bg-blue-100 text-blue-800'; },
