@@ -221,9 +221,41 @@ FRONTEND_HTML = r"""
                 if (heat < 3) return 'text-orange-500 font-bold';            // 低热度 (1-2次)，橙色
                 return 'text-red-600 font-bold animate-pulse';               // 高热度 (3次+)，红色且闪烁
             },
+            // 1. 设置标签整体样式 (背景 + 文字 + 边框)
+            getStatusBadgeClass(c) { 
+                // 转为大写，防止大小写不一致问题
+                const s = String(c.state.status).toUpperCase(); 
+                
+                // 🟢 Available: 绿色
+                if (s.includes('AVAILABLE')) 
+                    return 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20'; 
+                
+                // 🔴 Error / Failed: 红色
+                if (s.includes('ERROR') || s.includes('FAIL')) 
+                    return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/10'; 
+                
+                // 🟡 Busy: 黄色 (如果你的状态里有 BUSY 的话)
+                if (s.includes('BUSY')) 
+                    return 'bg-yellow-50 text-yellow-800 ring-1 ring-inset ring-yellow-600/20';
+            
+                // ⚫ Unavailable / Offline: 灰色
+                if (s.includes('UNAVAILABLE') || s.includes('OFFLINE')) 
+                    return 'bg-gray-50 text-gray-600 ring-1 ring-inset ring-gray-500/10'; 
+                
+                // 🔵 其他默认状态: 蓝色
+                return 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-700/10'; 
+            },
+            
+            // 2. 设置标签前面的小圆点颜色
+            getStatusDotClass(c) { 
+                const s = String(c.state.status).toUpperCase(); 
+                if (s.includes('AVAILABLE')) return 'bg-green-500';
+                if (s.includes('ERROR') || s.includes('FAIL')) return 'bg-red-500';
+                if (s.includes('BUSY')) return 'bg-yellow-500';
+                if (s.includes('UNAVAILABLE') || s.includes('OFFLINE')) return 'bg-gray-400';
+                return 'bg-blue-500'; 
+            },
             formatStatus(s) { return s.split('.').pop(); },
-            getStatusBadgeClass(c) { const s = String(c.state.status); if (s.includes('AVAILABLE')) return 'bg-green-100 text-green-800'; if (s.includes('ERROR')) return 'bg-red-100 text-red-800'; if (s.includes('UNAVAILABLE')) return 'bg-gray-100 text-gray-800'; return 'bg-blue-100 text-blue-800'; },
-            getStatusDotClass(c) { const s = String(c.state.status); if (s.includes('AVAILABLE')) return 'bg-green-500'; if (s.includes('ERROR')) return 'bg-red-500'; return 'bg-gray-500'; },
             getHealthColor(s) { if (s > 80) return 'bg-green-500'; if (s > 50) return 'bg-yellow-500'; return 'bg-red-500'; },
             formatMetricKey(k) { return k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()); },
             formatNumber(n) { if (n >= 1000) return (n/1000).toFixed(1) + 'k'; return n; },
