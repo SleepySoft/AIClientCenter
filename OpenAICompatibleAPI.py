@@ -55,7 +55,8 @@ RETRYABLE_STATUS_CODES = {
     500,  # Internal Server Error
     502,  # Bad Gateway
     503,  # Service Unavailable
-    504  # Gateway Timeout
+    504,  # Gateway Timeout
+    524
 }
 
 # Exceptions that indicate a transient (retryable) async error
@@ -151,12 +152,15 @@ class OpenAICompatibleAPI:
         """
         session = requests.Session()
 
-        # Define the retry strategy
         retry_strategy = Retry(
-            total=5,  # Total number of retries
-            backoff_factor=25,  # Base for exponential backoff (1s, 2s, 4s...)
-            status_forcelist=list(RETRYABLE_STATUS_CODES),  # HTTP codes to retry on
-            allowed_methods=["GET", "POST"]  # Only retry these idempotent/safe methods
+            total=5,  # [修改] 增加重试次数，从3改为5
+            backoff_factor=2,  # [修改] 增加退避因子。
+            # factor=2 意味着重试间隔为: 1s, 2s, 4s, 8s, 16s...
+            # 原来的 factor=1 只有 0.5s, 1s... 对429来说太快了
+            status_forcelist=list(RETRYABLE_STATUS_CODES),
+            allowed_methods=["GET", "POST"],
+            # [新增] 尊重服务端返回的 Retry-After 头 (如果有)
+            respect_retry_after_header=True
         )
 
         # Create an adapter and mount the retry strategy
@@ -296,7 +300,7 @@ class OpenAICompatibleAPI:
 
         try:
             # Use the pre-configured session.
-            response = self.sync_session.post(url, json=data, timeout=LLM_DEFAULT_TIMEOUT_S)  # Longer timeout for generation
+            response = self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))  # Longer timeout for generation
 
             # Return parsed JSON if successful, otherwise return the raw response
             return response.json() if response.status_code == 200 else response
@@ -306,12 +310,14 @@ class OpenAICompatibleAPI:
             logger.error(f"Max retries exceeded for create_chat_completion_sync: {e}")
             return {'error': f'Max retries reached. Last error: {str(e)}'}
 
-    # Use the 'backoff' decorator for exponential backoff on async methods
     @backoff.on_exception(
-        backoff.expo,  # Use exponential strategy
-        RETRYABLE_ASYNC_EXCEPTIONS,  # Retry on these exception classes
-        max_tries=4,  # Try a total of 4 times (1 initial + 3 retries)
-        giveup=lambda e: not is_retryable_async_error(e)  # Give up if error is not retryable
+        backoff.expo,
+        RETRYABLE_ASYNC_EXCEPTIONS,
+        max_tries=6,    # 增加尝试次数 (1次正常 + 5次重试)
+        base=2,         # 增加底数，让指数增长更明显 (2, 4, 8...)
+        factor=3,       # 乘数因子，进一步拉大间隔
+        max_time=120,   # 总重试时间不超过 120 秒
+        giveup=lambda e: not is_retryable_async_error(e)
     )
     async def create_chat_completion_async(self,
                                            messages: List[Dict[str, str]],
@@ -353,19 +359,28 @@ class OpenAICompatibleAPI:
             max_tokens=max_tokens
         )
 
-        # Use async POST request to send the completion request
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                    url,
-                    headers=self.get_header(),  # Get fresh headers (thread-safe)
-                    json=data,
-                    proxy=self._get_url_proxy(url),
-                    timeout=LLM_DEFAULT_TIMEOUT_S  # Set a timeout
-            ) as response:
-                # This is key: it raises an exception for 4xx/5xx status codes,
-                # which allows the @backoff decorator to catch them.
-                response.raise_for_status()
-                return await response.json()
+        # 优化超时设置：连接超时短(10s)，读取超时长(300s)
+        # 这样如果服务器挂了连不上，可以快速触发重试，而不是干等 5 分钟
+        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
+
+        # [注意] 最佳实践是将 session 作为类属性复用，而不是每次创建。
+        # 但为了不破坏你现有的代码结构，这里仅优化 context manager。
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        url,
+                        headers=self.get_header(),
+                        json=data,
+                        proxy=self._get_url_proxy(url)
+                ) as response:
+                    # 必须在这里针对 429/503 抛出异常，backoff 才能捕获
+                    response.raise_for_status()
+                    return await response.json()
+            except aiohttp.ClientResponseError as e:
+                # 显式记录 429 错误，方便调试
+                if e.status == 429:
+                    logger.warning(f"Rate limit hit (429) for model {self.using_model}. Retrying...")
+                raise e
 
     def create_completion_sync(self,
                                prompt: str,
@@ -398,7 +413,7 @@ class OpenAICompatibleAPI:
 
         try:
             # Use the pre-configured session.
-            response = self.sync_session.post(url, json=data, timeout=LLM_DEFAULT_TIMEOUT_S)
+            response = self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
 
             # Return parsed JSON if successful, otherwise return the raw response
             return response.json() if response.status_code == 200 else response
@@ -411,7 +426,10 @@ class OpenAICompatibleAPI:
     @backoff.on_exception(
         backoff.expo,
         RETRYABLE_ASYNC_EXCEPTIONS,
-        max_tries=4,
+        max_tries=6,    # 增加尝试次数 (1次正常 + 5次重试)
+        base=2,         # 增加底数，让指数增长更明显 (2, 4, 8...)
+        factor=3,       # 乘数因子，进一步拉大间隔
+        max_time=120,   # 总重试时间不超过 120 秒
         giveup=lambda e: not is_retryable_async_error(e)
     )
     async def create_completion_async(self,
@@ -452,16 +470,15 @@ class OpenAICompatibleAPI:
             max_tokens=max_tokens
         )
 
-        # Use async POST request to send the completion request
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                     url,
                     headers=self.get_header(),
                     json=data,
-                    proxy=self._get_url_proxy(url),
-                    timeout=LLM_DEFAULT_TIMEOUT_S
+                    proxy=self._get_url_proxy(url)
             ) as response:
-                # Trigger the @backoff decorator on 4xx/5xx errors
                 response.raise_for_status()
                 return await response.json()
 

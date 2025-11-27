@@ -420,8 +420,8 @@ class BaseAIClient(ABC):
     def _handle_api_error(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """处理API返回的业务错误"""
         error_data = response.get('error', {})
-        error_message = error_data.get('message', 'Unknown API error') if isinstance(error_data, dict) else str(
-            error_data)
+        error_message = error_data.get('message', 'API no more error message') \
+            if isinstance(error_data, dict) else str(error_data)
         error_type = error_data.get('type', 'unknown') if isinstance(error_data, dict) else 'unknown'
 
         # 根据错误类型分类
@@ -645,7 +645,7 @@ class AIClientManager:
                 # 1. Filter out permanently dead clients
                 if client_status == ClientStatus.UNAVAILABLE: continue
                 # TODO: Set an error threshold to not select this client.
-                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 2: continue
+                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1: continue
 
                 # 2. Check dynamic health (Optional optimization)
                 if client.calculate_health() <= 0:
