@@ -824,8 +824,13 @@ class AIClientManager:
         # 尝试获取锁并执行检查
         if client._acquire():
             try:
+                # 注册临时用户
+                self._set_test_user(client)
+
                 return client._test_and_update_status()
             finally:
+                # 注销临时用户
+                self._clear_test_user(client)
                 client._release()
         else:
             logger.warning(f"Could not acquire lock for {client_name} manual check")
@@ -972,6 +977,28 @@ class AIClientManager:
             # Sleep with a small deviation to avoid thundering herd if multiple managers exist
             time.sleep(self.check_error_interval)
 
+    def _generate_test_user_name(self, client: BaseAIClient) -> str:
+        """生成一个用于显示的测试者名称，包含Client名以防字典Key冲突"""
+        # 使用特殊前缀，让前端或日志能一眼看出这是系统行为
+        return f"[System Check] {client.name}"
+
+    def _set_test_user(self, client: BaseAIClient):
+        """在 user_client_map 中临时注册一个系统测试用户"""
+        test_user = self._generate_test_user_name(client)
+        with self._lock:
+            self.user_client_map[test_user] = {
+                "client": client,
+                "last_used": time.time()
+            }
+        logger.debug(f"Assigned test user '{test_user}' to client {client.name}")
+
+    def _clear_test_user(self, client: BaseAIClient):
+        """清除该 Client 对应的测试用户"""
+        test_user = self._generate_test_user_name(client)
+        with self._lock:
+            if test_user in self.user_client_map:
+                del self.user_client_map[test_user]
+
     def _check_client_health(self):
         """
         Trigger active health checks (connectivity/latency) for eligible clients.
@@ -992,10 +1019,10 @@ class AIClientManager:
 
                 # Determine timeout based on current status
                 timeout = {
-                    ClientStatus.UNKNOWN.value :    0,
-                    ClientStatus.AVAILABLE.value :  self.check_stable_interval,
+                    ClientStatus.UNKNOWN.value: 0,
+                    ClientStatus.AVAILABLE.value: self.check_stable_interval,
                     # Just treat error and fatal as the same.
-                    ClientStatus.ERROR.value:       adjusted_error_interval,
+                    ClientStatus.ERROR.value: adjusted_error_interval,
                     ClientStatus.UNAVAILABLE.value: adjusted_error_interval,
                 }.get(client_status.value, adjusted_error_interval)
 
@@ -1016,13 +1043,24 @@ class AIClientManager:
 
             # This method usually pings the API or checks simple connectivity
             if client._acquire():
-                result = client._test_and_update_status()
-                client._release()
+                try:
+                    # 标记为系统正在使用，让 Dashboard 能显示 "[System Check] ..."
+                    self._set_test_user(client)
 
-                if not result:
-                    logger.error(f"Status check - {client_name}: Unknown error.")
+                    # 执行原有的测试逻辑
+                    result = client._test_and_update_status()
+
+                    if not result:
+                        logger.error(f"Status check - {client_name}: Unknown error.")
+                except Exception as e:
+                    logger.error(f"Exception during health check for {client_name}: {e}")
+                finally:
+                    # [测试结束，移除系统用户
+                    self._clear_test_user(client)
+                    client._release()
             else:
-                logger.debug(f"Status check - Cannot acquire {client_name}.")
+                # 如果获取不到锁，说明正被真实用户使用，跳过本次检查
+                logger.debug(f"Status check - Cannot acquire {client_name} (Busy).")
 
     def _cleanup_unavailable_clients(self):
         """

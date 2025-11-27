@@ -140,12 +140,31 @@ FRONTEND_HTML = r"""
                         </td>
                         <!-- Allocation -->
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                            <div v-if="client.allocation.held_by" class="bg-indigo-50 border border-indigo-100 rounded p-2">
-                                <div class="text-indigo-700 font-bold"><i class="fa-regular fa-user mr-1"></i> {{ client.allocation.held_by }}</div>
-                                <div class="text-xs mt-1">Duration: {{ formatDuration(client.allocation.duration_seconds) }}</div>
+                            <div v-if="isSystemCheck(client.allocation.held_by)" class="bg-purple-50 border border-purple-100 rounded p-2">
+                                <div class="text-purple-700 font-bold flex items-center">
+                                    <i class="fa-solid fa-stethoscope mr-2 animate-pulse"></i> 
+                                    <span>Self Check</span>
+                                </div>
+                                <div class="text-xs mt-1 text-purple-600">
+                                    Duration: {{ formatDuration(client.allocation.duration_seconds) }}
+                                </div>
                             </div>
+                        
+                            <div v-else-if="client.allocation.held_by" class="bg-indigo-50 border border-indigo-100 rounded p-2">
+                                <div class="text-indigo-700 font-bold overflow-hidden text-ellipsis">
+                                    <i class="fa-regular fa-user mr-1"></i> 
+                                    {{ client.allocation.held_by }}
+                                </div>
+                                <div class="text-xs mt-1">
+                                    Duration: {{ formatDuration(client.allocation.duration_seconds) }}
+                                </div>
+                            </div>
+                        
                             <div v-else class="text-gray-400 text-xs">Idle</div>
-                            <div class="text-xs text-gray-400 mt-1">Last Active: {{ timeAgo(client.state.last_active_ts) }}</div>
+                        
+                            <div class="text-xs text-gray-400 mt-1">
+                                Last Active: {{ timeAgo(client.state.last_active_ts) }}
+                            </div>
                         </td>
                         <!-- Runtime Stats -->
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
@@ -155,8 +174,8 @@ FRONTEND_HTML = r"""
                                 <span class="text-gray-600">
                                     Heat: 
                                     <b :class="getHeatClass(client.runtime_stats.error_count)">
-                                        <i v-if="client.runtime_stats.error_count > 0" class="fa-solid fa-fire text-[10px] ml-1"></i>
                                         {{ client.runtime_stats.error_count || 0 }}
+                                        <i v-if="client.runtime_stats.error_count > 0" class="fa-solid fa-fire text-[10px] ml-1"></i>
                                     </b>
                                 </span>
 
@@ -215,6 +234,10 @@ FRONTEND_HTML = r"""
                     });
                     setTimeout(this.fetchData, 500);
                 } catch (e) { alert("Action failed"); }
+            },
+            isSystemCheck(name) {
+                // 只要名字以 [System Check] 开头，或者包含它，就认为是系统行为
+                return name && String(name).includes('[System Check]');
             },
             getHeatClass(heat) {
                 if (!heat || heat === 0) return 'text-gray-400 font-normal'; // 无热度，灰色
