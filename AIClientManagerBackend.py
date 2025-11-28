@@ -32,11 +32,15 @@ FRONTEND_HTML = r"""
     <style>
         .progress-bar { transition: width 0.5s ease; }
         [v-cloak] { display: none; }
+        /* 饱和时的条纹背景效果 */
+        .bg-striped {
+            background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent);
+            background-size: 1rem 1rem;
+        }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800 font-sans">
 <div id="app" v-cloak class="min-h-screen p-6">
-    <!-- Header -->
     <div class="max-w-7xl mx-auto mb-8 flex justify-between items-center">
         <div>
             <h1 class="text-3xl font-bold text-gray-900">
@@ -51,7 +55,6 @@ FRONTEND_HTML = r"""
         </div>
     </div>
 
-    <!-- Overview Cards -->
     <div class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-6 mb-8" v-if="stats.summary">
         <div class="bg-white rounded-lg shadow p-6 border-l-4 border-indigo-500">
             <div class="text-gray-500 text-sm uppercase font-semibold">Total Clients</div>
@@ -72,10 +75,9 @@ FRONTEND_HTML = r"""
         </div>
     </div>
 
-    <!-- Client List -->
     <div class="max-w-7xl mx-auto bg-white shadow rounded-lg overflow-hidden">
         <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-            <h2 class="text-lg font-semibold text-gray-700">Client Instances</h2>
+            <h2 class="text-lg font-semibold text-gray-700">Client Groups & Instances</h2>
             <span class="text-xs px-2 py-1 bg-gray-200 rounded text-gray-600">Auto-refresh: 2s</span>
         </div>
 
@@ -91,33 +93,77 @@ FRONTEND_HTML = r"""
                         <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
-                <tbody class="bg-white divide-y divide-gray-200">
-                    <tr v-for="client in stats.clients" :key="client.meta.name" class="hover:bg-gray-50 transition">
-                        <!-- Name, Priority & Model -->
+
+                <tbody class="bg-white" v-for="(group, groupName) in groupedClients" :key="groupName">
+
+                    <tr class="bg-gray-100 border-t border-b border-gray-200">
+                        <td colspan="6" class="px-6 py-2">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-4">
+                                    <span class="font-bold text-gray-700 text-sm">
+                                        <i class="fa-solid fa-layer-group text-gray-400 mr-2"></i>{{ groupName }}
+                                    </span>
+                                    <div class="flex items-center text-xs bg-white px-2 py-1 rounded border border-gray-300 shadow-sm"
+                                         :class="{'border-orange-300 bg-orange-50 text-orange-700': group.isSaturated}">
+                                        <span class="mr-2 font-semibold">Concurrency:</span>
+                                        <span class="font-mono" :class="{'text-red-600 font-bold': group.isSaturated}">
+                                            {{ group.activeCount }}
+                                        </span>
+                                        <span class="mx-1 text-gray-400">/</span>
+                                        <span class="font-mono">{{ group.limit === Infinity ? '∞' : group.limit }}</span>
+
+                                        <span v-if="group.isSaturated" class="ml-2 text-[10px] font-bold uppercase bg-orange-200 text-orange-800 px-1 rounded animate-pulse">
+                                            Limit Reached
+                                        </span>
+                                    </div>
+                                </div>
+                                <div v-if="group.limit !== Infinity" class="w-32 h-1.5 bg-gray-300 rounded-full overflow-hidden">
+                                    <div class="h-full bg-indigo-500 transition-all duration-500"
+                                         :class="{'bg-red-500': group.isSaturated, 'bg-green-500': group.activeCount < group.limit}"
+                                         :style="{ width: Math.min((group.activeCount / group.limit) * 100, 100) + '%' }">
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr v-for="client in group.clients" :key="client.meta.name" 
+                        class="hover:bg-gray-50 transition border-b border-gray-100 last:border-0"
+                        :class="{'opacity-60 bg-gray-50': isBlockedByGroupLimit(client, group)}">
+
                         <td class="px-6 py-4 whitespace-nowrap">
                             <div class="flex items-center">
                                 <div>
-                                    <div class="text-sm font-bold text-gray-900">{{ client.meta.name }}</div>
+                                    <div class="text-sm font-bold text-gray-900 flex items-center">
+                                        {{ client.meta.name }}
+                                        <i v-if="isBlockedByGroupLimit(client, group)" 
+                                           class="fa-solid fa-ban text-red-400 ml-2" 
+                                           title="Blocked by group concurrency limit"></i>
+                                    </div>
                                     <div class="text-xs text-gray-500">Type: {{ client.meta.type }}</div>
-
-                                    <!-- 显示当前模型 -->
                                     <div class="text-xs text-indigo-600 font-mono mt-1" v-if="client.meta.current_model && client.meta.current_model !== 'Unknown'">
                                         <i class="fa-solid fa-microchip mr-1"></i>{{ client.meta.current_model }}
                                     </div>
-
                                     <div class="text-xs text-gray-500 mt-1">Priority: <span class="font-mono bg-gray-100 px-1 rounded">{{ client.meta.priority }}</span></div>
                                 </div>
                             </div>
                         </td>
-                        <!-- Status -->
+
                         <td class="px-6 py-4 whitespace-nowrap">
-                            <span :class="getStatusBadgeClass(client)" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full items-center">
-                                <span class="w-2 h-2 rounded-full mr-2" :class="getStatusDotClass(client)"></span>
-                                {{ formatStatus(client.state.status) }}
-                            </span>
-                            <div v-if="client.state.is_busy" class="text-xs text-yellow-600 mt-1 font-semibold animate-pulse">● IN USE</div>
+                            <div class="flex flex-col items-start">
+                                <span :class="getStatusBadgeClass(client)" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full items-center">
+                                    <span class="w-2 h-2 rounded-full mr-2" :class="getStatusDotClass(client)"></span>
+                                    {{ formatStatus(client.state.status) }}
+                                </span>
+
+                                <div v-if="client.state.is_busy" class="text-xs text-yellow-600 mt-1 font-semibold animate-pulse">● IN USE</div>
+
+                                <div v-if="isBlockedByGroupLimit(client, group)" class="text-[10px] text-red-500 mt-1 font-bold border border-red-200 bg-red-50 px-1 rounded">
+                                    BLOCKED BY LIMIT
+                                </div>
+                            </div>
                         </td>
-                        <!-- Health & Metrics -->
+
                         <td class="px-6 py-4 align-top w-64">
                             <div class="mb-2">
                                 <div class="flex justify-between text-xs mb-1">
@@ -136,11 +182,10 @@ FRONTEND_HTML = r"""
                                     <span>{{ formatNumber(m.current) }} / {{ formatNumber(m.target) }}</span>
                                 </div>
                             </div>
-                            <div v-else class="text-xs text-gray-300 italic">No usage limits</div>
                         </td>
-                        <!-- Allocation -->
+
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                            <div v-if="isSystemCheck(client.allocation.held_by)" class="bg-purple-50 border border-purple-100 rounded p-2">
+                             <div v-if="isSystemCheck(client.allocation.held_by)" class="bg-purple-50 border border-purple-100 rounded p-2">
                                 <div class="text-purple-700 font-bold flex items-center">
                                     <i class="fa-solid fa-stethoscope mr-2 animate-pulse"></i> 
                                     <span>Self Check</span>
@@ -149,7 +194,6 @@ FRONTEND_HTML = r"""
                                     Duration: {{ formatDuration(client.allocation.duration_seconds) }}
                                 </div>
                             </div>
-                        
                             <div v-else-if="client.allocation.held_by" class="bg-indigo-50 border border-indigo-100 rounded p-2">
                                 <div class="text-indigo-700 font-bold overflow-hidden text-ellipsis">
                                     <i class="fa-regular fa-user mr-1"></i> 
@@ -159,18 +203,15 @@ FRONTEND_HTML = r"""
                                     Duration: {{ formatDuration(client.allocation.duration_seconds) }}
                                 </div>
                             </div>
-                        
                             <div v-else class="text-gray-400 text-xs">Idle</div>
-                        
                             <div class="text-xs text-gray-400 mt-1">
                                 Last Active: {{ timeAgo(client.state.last_active_ts) }}
                             </div>
                         </td>
-                        <!-- Runtime Stats -->
-                        <td class="px-6 py-4 whitespace-nowrap text-xs">
-                            <div class="flex flex-col space-y-1">
-                                <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.chat_count }}</b></span>
 
+                        <td class="px-6 py-4 whitespace-nowrap text-xs">
+                             <div class="flex flex-col space-y-1">
+                                <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.chat_count }}</b></span>
                                 <span class="text-gray-600">
                                     Heat: 
                                     <b :class="getHeatClass(client.runtime_stats.error_count)">
@@ -178,12 +219,11 @@ FRONTEND_HTML = r"""
                                         <i v-if="client.runtime_stats.error_count > 0" class="fa-solid fa-fire text-[10px] ml-1"></i>
                                     </b>
                                 </span>
-
                                 <span class="text-gray-600">Errors: <b :class="{'text-red-600': client.runtime_stats.error_sum > 0}">{{ client.runtime_stats.error_sum }}</b></span>
                                 <span class="text-gray-400">Rate: {{ client.runtime_stats.error_rate_percent }}%</span>
                             </div>
                         </td>
-                        <!-- Actions -->
+
                         <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                             <div class="flex flex-col space-y-2 items-end">
                                 <button @click="triggerCheck(client.meta.name)" class="text-indigo-600 hover:text-indigo-900 text-xs bg-indigo-50 px-2 py-1 rounded border border-indigo-200 hover:bg-indigo-100 transition">
@@ -210,10 +250,54 @@ FRONTEND_HTML = r"""
     createApp({
         data() { return { stats: { summary: null, clients: [] }, loading: false, lastUpdated: '-', timer: null } },
         mounted() { this.fetchData(); this.timer = setInterval(this.fetchData, 2000); },
+        computed: {
+            // 核心逻辑：将 flat list 转换为按 group 聚合的对象
+            groupedClients() {
+                if (!this.stats.clients) return {};
+
+                const groups = {};
+                const limits = (this.stats.summary && this.stats.summary.group_limits) ? this.stats.summary.group_limits : {};
+
+                // 1. 分组 & 基础统计
+                this.stats.clients.forEach(c => {
+                    // 确保 group_id 存在，你需要在 python 的 meta 中加入 group_id
+                    const gid = c.meta.group_id || 'Default Group';
+
+                    if (!groups[gid]) {
+                        groups[gid] = {
+                            clients: [],
+                            limit: limits[gid] !== undefined ? limits[gid] : Infinity,
+                            activeCount: 0,
+                            isSaturated: false
+                        };
+                    }
+                    groups[gid].clients.push(c);
+
+                    // 计算当前组内忙碌的 client (根据你的 Manager 逻辑，busy = 占用名额)
+                    if (c.state.is_busy) {
+                        groups[gid].activeCount++;
+                    }
+                });
+
+                // 2. 计算饱和状态
+                for (const gid in groups) {
+                    const g = groups[gid];
+                    if (g.limit !== Infinity && g.activeCount >= g.limit) {
+                        g.isSaturated = true;
+                    }
+                    // 按优先级对组内 client 排序 (数字越小优先级越高)
+                    g.clients.sort((a, b) => a.meta.priority - b.meta.priority);
+                }
+
+                // 3. (可选) 对 Group 本身排序? 比如按字母或者按饱和度
+                // 这里返回对象，Vue 的 v-for 遍历对象顺序可能不固定，但现代浏览器一般按插入序
+                // 如果需要严格顺序，可以返回 Array。这里暂且返回 Object。
+                return groups;
+            }
+        },
         methods: {
             async fetchData() {
                 try {
-                    // 使用相对路径，自动适应挂载点
                     const res = await fetch('api/overview');
                     if (!res.ok) throw new Error(res.statusText);
                     const data = await res.json();
@@ -221,6 +305,18 @@ FRONTEND_HTML = r"""
                     this.lastUpdated = new Date().toLocaleTimeString();
                 } catch (e) { console.error("Fetch error", e); }
             },
+
+            // 判断一个 client 是否因为组限制而实际上不可用
+            // 条件：Client 是 Available 且 Idle，但 Group 已经 Saturated
+            isBlockedByGroupLimit(client, group) {
+                if (!client || !group) return false;
+                const isAvailable = String(client.state.status).toUpperCase().includes('AVAILABLE');
+                const isIdle = !client.state.is_busy;
+
+                return isAvailable && isIdle && group.isSaturated;
+            },
+
+            // --- 其他原有 Helper 方法保持不变 ---
             async triggerCheck(name) {
                 if(!confirm(`Force health check for ${name}?`)) return;
                 try { await fetch(`api/clients/${name}/check`, { method: 'POST' }); setTimeout(this.fetchData, 500); } catch (e) { alert("Action failed"); }
@@ -235,41 +331,20 @@ FRONTEND_HTML = r"""
                     setTimeout(this.fetchData, 500);
                 } catch (e) { alert("Action failed"); }
             },
-            isSystemCheck(name) {
-                // 只要名字以 [System Check] 开头，或者包含它，就认为是系统行为
-                return name && String(name).includes('[System Check]');
-            },
+            isSystemCheck(name) { return name && String(name).includes('[System Check]'); },
             getHeatClass(heat) {
-                if (!heat || heat === 0) return 'text-gray-400 font-normal'; // 无热度，灰色
-                if (heat < 3) return 'text-orange-500 font-bold';            // 低热度 (1-2次)，橙色
-                return 'text-red-600 font-bold animate-pulse';               // 高热度 (3次+)，红色且闪烁
+                if (!heat || heat === 0) return 'text-gray-400 font-normal'; 
+                if (heat < 3) return 'text-orange-500 font-bold';            
+                return 'text-red-600 font-bold animate-pulse';               
             },
-            // 1. 设置标签整体样式 (背景 + 文字 + 边框)
             getStatusBadgeClass(c) { 
-                // 转为大写，防止大小写不一致问题
                 const s = String(c.state.status).toUpperCase(); 
-                
-                // 🟢 Available: 绿色
-                if (s.includes('AVAILABLE')) 
-                    return 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20'; 
-                
-                // 🔴 Error / Failed: 红色
-                if (s.includes('ERROR') || s.includes('FAIL')) 
-                    return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/10'; 
-                
-                // 🟡 Busy: 黄色 (如果你的状态里有 BUSY 的话)
-                if (s.includes('BUSY')) 
-                    return 'bg-yellow-50 text-yellow-800 ring-1 ring-inset ring-yellow-600/20';
-            
-                // ⚫ Unavailable / Offline: 灰色
-                if (s.includes('UNAVAILABLE') || s.includes('OFFLINE')) 
-                    return 'bg-gray-50 text-gray-600 ring-1 ring-inset ring-gray-500/10'; 
-                
-                // 🔵 其他默认状态: 蓝色
+                if (s.includes('AVAILABLE')) return 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-600/20'; 
+                if (s.includes('ERROR') || s.includes('FAIL')) return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/10'; 
+                if (s.includes('BUSY')) return 'bg-yellow-50 text-yellow-800 ring-1 ring-inset ring-yellow-600/20';
+                if (s.includes('UNAVAILABLE') || s.includes('OFFLINE')) return 'bg-gray-50 text-gray-600 ring-1 ring-inset ring-gray-500/10'; 
                 return 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-700/10'; 
             },
-            
-            // 2. 设置标签前面的小圆点颜色
             getStatusDotClass(c) { 
                 const s = String(c.state.status).toUpperCase(); 
                 if (s.includes('AVAILABLE')) return 'bg-green-500';

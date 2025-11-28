@@ -56,7 +56,7 @@ class BaseAIClient(ABC):
                 BaseAIClient.__init__(self, ...)
     """
 
-    def __init__(self, name: str, api_token: str, priority: int = CLIENT_PRIORITY_NORMAL):
+    def __init__(self, name: str, api_token: str, priority: int = CLIENT_PRIORITY_NORMAL, group_id: str = "default"):
         """
         Initialize AI client with token and priority.
 
@@ -68,6 +68,7 @@ class BaseAIClient(ABC):
         self.name = name
         self.api_token = api_token
         self.priority = priority
+        self.group_id = group_id
 
         self._lock = threading.RLock()
         self._status = {
@@ -585,6 +586,9 @@ class AIClientManager:
         # Structure: { "user_name": {"client": client_obj, "last_used": timestamp} }
         self.user_client_map: Dict[str, Dict[str, Any]] = {}
 
+        # 分组并发限制配置 { 'group_id': max_concurrent_limit }
+        self.group_limits: Dict[str, int] = {}
+
         self._lock = threading.RLock()
         self.monitor_thread = None
         self.monitor_running = False
@@ -605,6 +609,11 @@ class AIClientManager:
             # This ensures get_available_client always picks the best one first.
             self.clients.sort(key=lambda x: x.priority)
             logger.info(f"Registered client: {getattr(client, 'name', 'Unknown')}")
+
+    def set_group_limit(self, group_id: str, limit: int):
+        with self._lock:
+            self.group_limits[group_id] = limit
+            logger.info(f"Set concurrency limit for group '{group_id}' to {limit}")
 
     def get_available_client(self, user_name: str) -> Optional[Any]:
         """
@@ -638,18 +647,44 @@ class AIClientManager:
                 self._release_user_resources(user_name)
                 current_client = None
 
+            # 统计当前各组的使用情况
+            # 复杂度为 O(User数量)，通常用户并发数不会特别大，直接统计比维护计数器更安全
+            current_group_usage = {}
+            for info in self.user_client_map.values():
+                client_in_use = info['client']
+                gid = getattr(client_in_use, 'group_id', None)
+                if gid:
+                    current_group_usage[gid] = current_group_usage.get(gid, 0) + 1
+
             # Iterate through clients (already sorted by priority: High -> Low)
             for client in self.clients:
                 client_status = client.get_status('status')
 
                 # 1. Filter out permanently dead clients
                 if client_status == ClientStatus.UNAVAILABLE: continue
+
                 # TODO: Set an error threshold to not select this client.
                 if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1: continue
 
                 # 2. Check dynamic health (Optional optimization)
-                if client.calculate_health() <= 0:
-                    continue
+                if client.calculate_health() <= 0: continue
+
+                # 检查分组限制
+                gid = getattr(client, 'group_id', None)
+
+                # 如果是用户当前正持有的 client，无视限制（因为他已经占用了这个坑位）
+                is_current_users_client = (client is current_client)
+
+                if not is_current_users_client and gid in self.group_limits:
+                    limit = self.group_limits[gid]
+                    current_count = current_group_usage.get(gid, 0)
+
+                    # 核心逻辑：如果当前组用量 >= 限制，跳过这个 Client
+                    # 即使它是 AVAILABLE 的，也不分配，从而达到"备用"或"限流"的目的
+                    if current_count >= limit:
+                        logger.debug(
+                            f"Skipping client {client.name}: Group '{gid}' reached limit ({current_count}/{limit})")
+                        continue
 
                 # 3. Logic for selection
                 # Case A: We found the client currently held by this user.
@@ -762,6 +797,7 @@ class AIClientManager:
                     "meta": {
                         "name": getattr(client, "name", "Unknown"),
                         "type": client.__class__.__name__,
+                        "group_id": getattr(client, "group_id", "default"),
                         "priority": client.priority,
                     },
                     "state": {
@@ -797,6 +833,7 @@ class AIClientManager:
                 "summary": {
                     "timestamp": now,
                     "total_clients": len(self.clients),
+                    "group_limits": self.group_limits,
                     "available": available_cnt,
                     "busy": busy_cnt,
                     "clients_with_errors": error_cnt_clients,
