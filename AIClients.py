@@ -36,6 +36,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             name: str,
             openai_api: OpenAICompatibleAPI,
             priority: int = CLIENT_PRIORITY_NORMAL,
+            group_id: str = 'default',
             default_available: bool = False,
             quota_config: dict = None,
             balance_config: dict = None,
@@ -59,6 +60,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             name=name,
             api_token=openai_api.get_api_token(),
             priority=priority,
+            group_id=group_id,
 
             # Initialize ClientMetricsMixin
             quota_config=quota_config,
