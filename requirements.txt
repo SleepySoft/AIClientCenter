@@ -8,3 +8,5 @@ typing-extensions
 fastapi
 uvicorn
 jinja2
+
+zai-sdk

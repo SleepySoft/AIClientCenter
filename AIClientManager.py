@@ -615,99 +615,122 @@ class AIClientManager:
             self.group_limits[group_id] = limit
             logger.info(f"Set concurrency limit for group '{group_id}' to {limit}")
 
-    def get_available_client(self, user_name: str) -> Optional[Any]:
+    def get_available_client(self, user_name: str,
+                             request_change: bool = False,
+                             target_group_id: str = None,
+                             target_client_name: str = None) -> Optional[Any]:
         """
-        Get an available client for a specific user.
-
-        Logic:
-        1. If user already holds a client:
-           - If a higher priority client is free, release old and grab new.
-           - If no higher priority client is free, keep the current one (refresh timestamp).
-        2. If user holds no client:
-           - Acquire the highest priority free client.
+        Get an available client for a specific user with enhanced filtering options.
 
         Args:
-            user_name: The identifier for the user requesting the client.
+            user_name: The identifier for the user.
+            request_change: If True, the current client held by the user (if any) is excluded
+                            from selection. Effectively requests a "different" client.
+            target_group_id: If set, only clients belonging to this group are considered.
+            target_client_name: If set, strictly selects only the client with this name.
+                                Highest priority filter.
 
         Returns:
-            BaseAIClient or None if no clients are available/healthy.
+            BaseAIClient or None.
         """
         if not user_name:
             logger.error("user_name is required to get a client.")
             return None
 
         with self._lock:
-            # Retrieve current allocation for this user
+            # 1. Retrieve current allocation
             current_allocation = self.user_client_map.get(user_name)
             current_client = current_allocation['client'] if current_allocation else None
 
-            # If the current client is effectively dead/removed, treat user as having no client
+            # 2. Cleanup: If current client is effectively dead, release it first
             if current_client and (current_client not in self.clients or
-                                   current_client.get_status('status') in [ClientStatus.ERROR, ClientStatus.UNAVAILABLE]):
+                                   current_client.get_status('status') in [ClientStatus.ERROR,
+                                                                           ClientStatus.UNAVAILABLE]):
                 self._release_user_resources(user_name)
                 current_client = None
 
-            # 统计当前各组的使用情况
-            # 复杂度为 O(User数量)，通常用户并发数不会特别大，直接统计比维护计数器更安全
+            # 3. Calculate Group Usage
+            # If request_change is True, we treat the current user as "not holding a slot"
+            # for the purpose of finding a replacement (Swap Logic).
             current_group_usage = {}
-            for info in self.user_client_map.values():
+            for u_name, info in self.user_client_map.items():
                 client_in_use = info['client']
+
+                # Logic adjustment for request_change:
+                # If this is the current user AND they want to change, do not count their
+                # current client towards the group limit. This allows swapping within a full group.
+                if request_change and u_name == user_name:
+                    continue
+
                 gid = getattr(client_in_use, 'group_id', None)
                 if gid:
                     current_group_usage[gid] = current_group_usage.get(gid, 0) + 1
 
-            # Iterate through clients (already sorted by priority: High -> Low)
+            # 4. Iterate through clients (Priority: High -> Low)
             for client in self.clients:
+                client_name = getattr(client, 'name', '')
                 client_status = client.get_status('status')
-
-                # 1. Filter out permanently dead clients
-                if client_status == ClientStatus.UNAVAILABLE: continue
-
-                # TODO: Set an error threshold to not select this client.
-                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1: continue
-
-                # 2. Check dynamic health (Optional optimization)
-                if client.calculate_health() <= 0: continue
-
-                # 检查分组限制
                 gid = getattr(client, 'group_id', None)
 
-                # 如果是用户当前正持有的 client，无视限制（因为他已经占用了这个坑位）
+                # --- FILTER: Target Name (Highest Priority Strict Check) ---
+                if target_client_name and client_name != target_client_name:
+                    continue
+
+                # --- FILTER: Target Group ---
+                if target_group_id and gid != target_group_id:
+                    continue
+
+                # --- FILTER: Request Change (Exclude Current) ---
+                # If user explicitly wants a change, the current client is not a candidate.
+                if request_change and client is current_client:
+                    continue
+
+                # --- Standard Health Checks ---
+                if client_status == ClientStatus.UNAVAILABLE:
+                    continue
+
+                # Error threshold check
+                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
+                    continue
+
+                # Dynamic health check
+                if client.calculate_health() <= 0:
+                    continue
+
+                # --- FILTER: Group Concurrency Limits ---
+                # Logic: If it is the current user's client, they already hold the slot (limit ignored).
+                # BUT if request_change is True, we already skipped 'current_client' above,
+                # so we will treat every candidate as a 'new' acquisition subject to limits.
                 is_current_users_client = (client is current_client)
 
                 if not is_current_users_client and gid in self.group_limits:
                     limit = self.group_limits[gid]
                     current_count = current_group_usage.get(gid, 0)
 
-                    # 核心逻辑：如果当前组用量 >= 限制，跳过这个 Client
-                    # 即使它是 AVAILABLE 的，也不分配，从而达到"备用"或"限流"的目的
                     if current_count >= limit:
                         logger.debug(
-                            f"Skipping client {client.name}: Group '{gid}' reached limit ({current_count}/{limit})")
+                            f"Skipping client {client_name}: Group '{gid}' limit reached ({current_count}/{limit})")
                         continue
 
-                # 3. Logic for selection
+                # --- SELECTION LOGIC ---
+
                 # Case A: We found the client currently held by this user.
-                # Since we iterate by priority, if we reached here, it means
-                # no *higher* priority client was free. So we keep this one.
+                # (We only reach here if request_change is False, because of the filter above)
                 if client is current_client:
                     self.user_client_map[user_name]['last_used'] = time.time()
-                    logger.debug(f"User {user_name} keeps client: {client.name}")
+                    logger.debug(f"User {user_name} keeps current client: {client.name}")
                     return client
 
-                # Case B: We found a free client (not busy).
-                # Since this appears *before* the current_client in the loop (or user has no client),
-                # this client has higher priority. We should take it.
+                # Case B: We found a free client (or the specific target requested).
                 if not client._is_busy():
-                    # Try to acquire the lock/token for the new client
+                    # Attempt to acquire
                     if client._acquire():
-                        # If user had an old client, release it first
+                        # Release old client if exists
                         if current_client:
                             self._release_client_core(current_client)
-                            logger.info(
-                                f"User {user_name} switching from {current_client.name} to better client {client.name}")
+                            logger.info(f"User {user_name} switching from {current_client.name} to {client.name}")
 
-                        # Update map with new client
+                        # Update map
                         self.user_client_map[user_name] = {
                             "client": client,
                             "last_used": time.time()
@@ -715,8 +738,9 @@ class AIClientManager:
                         logger.info(f"User {user_name} acquired client: {client.name}")
                         return client
 
-            # If we exit loop and user had a client but it wasn't found (should be covered by initial check)
-            # or no suitable client found at all.
+            # End of Loop: No suitable client found.
+            # If target_client_name was set, it means that specific client is unavailable.
+            # If request_change was True, it means no OTHER client is available.
             return None
 
     def release_client(self, client: BaseAIClient | str):

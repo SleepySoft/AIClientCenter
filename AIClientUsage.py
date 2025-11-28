@@ -12,11 +12,13 @@ self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
 try:
+    from .ai_client_config_example import AI_CLIENTS
     from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from .AIServiceTokenRotator import SiliconFlowServiceRotator
 except ImportError:
+    from ai_client_config_example import AI_CLIENTS
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
