@@ -58,7 +58,7 @@ An AI client center that supports token and model rotation
 
 [OpenAICompatibleAPI.py](OpenAICompatibleAPI.py)
 
-> OpenAI风格的API接口，通常并不会直接使用，而是将其传入 OpenAIRotationClient 并加入 AIClientManager 统一管理。
+> OpenAI风格的API接口，通常并不会直接使用，而是将其传入 BaseAIClient 并加入 AIClientManager 统一管理。
 
 
 ---------

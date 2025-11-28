@@ -12,12 +12,12 @@ self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
 try:
-    from .AIClients import OpenAIRotationClient
+    from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from .AIServiceTokenRotator import SiliconFlowServiceRotator
 except ImportError:
-    from AIClients import OpenAIRotationClient
+    from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from AIServiceTokenRotator import SiliconFlowServiceRotator
@@ -182,7 +182,7 @@ def main():
     setup_colored_logging()
 
     sf_api_a = create_siliconflow_client()
-    sf_client_a = OpenAIRotationClient(
+    sf_client_a = OuterTokenRotatingOpenAIClient(
         'SiliconFlow Client A',
         sf_api_a,
         CLIENT_PRIORITY_EXPENSIVE,
@@ -196,7 +196,7 @@ def main():
     )
 
     sf_api_b = create_siliconflow_client()
-    sf_client_b = OpenAIRotationClient(
+    sf_client_b = OuterTokenRotatingOpenAIClient(
         'SiliconFlow Client B',
         sf_api_b,
         CLIENT_PRIORITY_EXPENSIVE,
@@ -209,12 +209,12 @@ def main():
         threshold=0.1
     )
 
-    # sf_rotator_a.run_in_thread()
-    # sf_rotator_b.run_in_thread()
+    sf_rotator_a.run_in_thread()
+    sf_rotator_b.run_in_thread()
 
     client_manager = AIClientManager()
-    # client_manager.register_client(sf_client_a)
-    # client_manager.register_client(sf_client_b)
+    client_manager.register_client(sf_client_a)
+    client_manager.register_client(sf_client_b)
 
     # Modelscope: 每天总共 2000 次 API-Inference 调用免费额度，其中每个单模型额度上限500次
 
@@ -230,8 +230,9 @@ def main():
     print(ms_api.get_model_list())
     print('======================================================================')
 
-    ms_client = OpenAIRotationClient(f'ModelScope Client', ms_api, CLIENT_PRIORITY_FREEBIE, default_available=True)
+    ms_client = SelfRotatingOpenAIClient(f'ModelScope Client', ms_api, CLIENT_PRIORITY_FREEBIE, default_available=True)
     ms_client.set_rotation_models(ms_models)
+    ms_client.set_rotation_tokens(['You tokens'])
     ms_client.set_usage_constraints(max_tokens=495, period_days=1, target_metric='request_count')
     client_manager.register_client(ms_client)
 
