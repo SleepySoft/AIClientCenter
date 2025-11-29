@@ -7,18 +7,19 @@ import traceback
 from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor
 
+from AIClientCenter.ComplexConversation import MESSAGE
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
 try:
-    from .ai_client_config_example import AI_CLIENTS
+    from .AIClientConfigExample import AI_CLIENTS
     from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from .AIServiceTokenRotator import SiliconFlowServiceRotator
 except ImportError:
-    from ai_client_config_example import AI_CLIENTS
+    from AIClientConfigExample import AI_CLIENTS
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
@@ -140,17 +141,22 @@ def simple_chat(user_message: str, context: Optional[List[Dict[str, str]]] = Non
     return messages
 
 
-def worker_task(client, request_id, manager):
+def worker_task(client, request_id, manager, content: str = 'random'):
     """
     后台工作线程：执行对话任务，记录耗时，并最终释放客户端。
     """
-    prompt = get_random_test_prompt()
-    start_time = time.time()
-
-    print(f"\n[Request #{request_id}] 🚀 Assigned to {client.name}: '{prompt}'")
-
     try:
-        messages = simple_chat(prompt)
+        if content == 'random':
+            prompt = get_random_test_prompt()
+            messages = simple_chat(prompt)
+        elif content == 'complex':
+            messages = MESSAGE
+        else:
+            messages = content
+
+        print(f"\n[Request #{request_id}] 🚀 Assigned to {client.name}")
+
+        start_time = time.time()
         response = client.chat(messages=messages)
 
         # 这里假设 response 结构，根据实际情况调整
@@ -180,66 +186,21 @@ def print_wait_status(count):
     sys.stdout.flush()
 
 
-def main():
-    setup_colored_logging()
-
-    sf_api_a = create_siliconflow_client()
-    sf_client_a = OuterTokenRotatingOpenAIClient(
-        'SiliconFlow Client A',
-        sf_api_a,
-        CLIENT_PRIORITY_EXPENSIVE,
-        balance_config={ 'hard_threshold': 0.1 }
-    )
-    sf_rotator_a = SiliconFlowServiceRotator(
-        ai_client=sf_client_a,
-        keys_file='siliconflow_keys_a.txt',
-        keys_record_file='key_record_a.json',
-        threshold=0.1
-    )
-
-    sf_api_b = create_siliconflow_client()
-    sf_client_b = OuterTokenRotatingOpenAIClient(
-        'SiliconFlow Client B',
-        sf_api_b,
-        CLIENT_PRIORITY_EXPENSIVE,
-        balance_config={ 'hard_threshold': 0.1 }
-    )
-    sf_rotator_b = SiliconFlowServiceRotator(
-        ai_client=sf_client_b,
-        keys_file='siliconflow_keys_b.txt',
-        keys_record_file='key_record_b.json',
-        threshold=0.1
-    )
-
-    sf_rotator_a.run_in_thread()
-    sf_rotator_b.run_in_thread()
-
+def setup_client_manager():
     client_manager = AIClientManager()
-    client_manager.register_client(sf_client_a)
-    client_manager.register_client(sf_client_b)
+    clients = AI_CLIENTS
 
-    # Modelscope: 每天总共 2000 次 API-Inference 调用免费额度，其中每个单模型额度上限500次
+    # Register all clients.
+    # [client_manager.register_client(client) for client in clients]
 
-    ms_models = [
-        'deepseek-ai/DeepSeek-R1-0528',
-        'deepseek-ai/DeepSeek-V3.2-Exp',
-        'Qwen/Qwen3-Coder-480B-A35B-Instruct'
-    ]
+    # Or register specified client.
+    specified_client = clients['zhipu_client']
+    client_manager.register_client(specified_client)
 
-    ms_api = create_modelscope_client('ms-0657d62b-eaac-4ce5-a14d-f6f5106ad983')
+    return client_manager
 
-    print('============================= Model List =============================')
-    print(ms_api.get_model_list())
-    print('======================================================================')
 
-    ms_client = SelfRotatingOpenAIClient(f'ModelScope Client', ms_api, CLIENT_PRIORITY_FREEBIE, default_available=True)
-    ms_client.set_rotation_models(ms_models)
-    ms_client.set_rotation_tokens(['You tokens'])
-    ms_client.set_usage_constraints(max_tokens=495, period_days=1, target_metric='request_count')
-    client_manager.register_client(ms_client)
-
-    client_manager.start_monitoring()
-
+def run_ai_test(client_manager: AIClientManager):
     STATS_INTERVAL = 10  # 每处理多少个请求打印一次统计
     MAX_WORKERS = 5  # 线程池大小（最大并发数）
 
@@ -295,16 +256,14 @@ def main():
             # 稍微 sleep 一下避免 CPU 空转太快（如果有大量客户端，这个可以设很小）
             time.sleep(0.1)
 
-    # while True:
-    #     client = client_manager.get_available_client()
-    #     if not client:
-    #         print('Client is not available yet.')
-    #     else:
-    #         print(f'Got client {client.name}')
-    #         result = client.chat(messages=simple_chat('请介绍一下你自己。'))
-    #         print(result)
-    #         client_manager.release_client(client)
-    #     time.sleep(2)
+
+def main():
+    setup_colored_logging()
+
+    client_manager = setup_client_manager()
+    client_manager.start_monitoring()
+
+    run_ai_test(client_manager)
 
 
 if __name__ == '__main__':

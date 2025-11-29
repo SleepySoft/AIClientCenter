@@ -1,9 +1,9 @@
 # --------------------------------------------------------------------------------
 # Python is config. We don't need a json file and load it, analyze it.
-# Rename ai_client_config_example.py to ai_client_config.py to enable this config.
+# Rename AIClientConfigExample.py to ai_client_config.py to enable this config.
 # --------------------------------------------------------------------------------
-
-from typing import List
+import os
+from typing import List, Dict
 
 from GlobalConfig import *
 from AIClientCenter.ZhipuSDKAdapter import ZhipuSDKAdapter
@@ -15,7 +15,7 @@ from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create
 from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
 
 
-def build_ai_clients() -> List[BaseAIClient]:
+def build_ai_clients() -> Dict[str, BaseAIClient]:
     # -------- The default silicon flow client --------
     # - Use high balance account's token
     # - It is considered available by default.
@@ -100,7 +100,9 @@ def build_ai_clients() -> List[BaseAIClient]:
         'Token3'
     ]
 
-    ms_api = create_modelscope_client(token="If you don't need token rotation, set the token here.")
+    ms_api = create_modelscope_client(
+        token="If you don't need token rotation, set the token here."
+    )
     ms_client = SelfRotatingOpenAIClient(
         name=f'ModelScope Client',
         openai_api=ms_api,
@@ -118,19 +120,26 @@ def build_ai_clients() -> List[BaseAIClient]:
     # ------------------------------------------------
 
     zhipu_adapter = ZhipuSDKAdapter(
-        api_key="your-zhipu-key",
+        api_key=os.getenv('ZHIPU_API_KEY', "your-zhipu-key"),
         enable_thinking=False
     )
     zhipu_client = StandardOpenAIClient(
         name="zhipu-01",
         openai_api=zhipu_adapter,
         priority=CLIENT_PRIORITY_CONSUMABLES,
-        group_id='zhipu'
+        group_id='zhipu',
+        default_available=True
     )
 
     # --------------------------------------------------------
 
-    return [sf_client_default, sf_client_a, sf_client_b, ms_client, zhipu_client]
+    return {
+        'sf_client_default': sf_client_default,
+        'sf_client_a': sf_client_a,
+        'sf_client_b': sf_client_b,
+        'ms_client': ms_client,
+        'zhipu_client': zhipu_client,
+    }
 
 
 AI_CLIENTS = build_ai_clients()
