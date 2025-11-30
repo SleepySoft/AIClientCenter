@@ -5,6 +5,7 @@
 import os
 from typing import List, Dict
 
+from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 from GlobalConfig import *
 from AIClientCenter.ZhipuSDKAdapter import ZhipuSDKAdapter
 from AIClientCenter.AIClients import StandardOpenAIClient, \
@@ -133,12 +134,28 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     # --------------------------------------------------------
 
+    gemini_api_1 = GoogleGeminiAdapter(
+        api_key='AIzaSyDQFb29QyRMTBpPAhoaLED23vu-mG0gb-k',
+        model='gemini-2.5-flash-lite',
+        proxy='http://127.0.0.1:10809'
+    )
+    gemini_client_1 = StandardOpenAIClient(
+        name="Gemini 1",
+        openai_api=gemini_api_1,
+        priority=CLIENT_PRIORITY_CONSUMABLES,
+        group_id='gemini',
+        default_available=True
+    )
+
+    # --------------------------------------------------------
+
     return {
         'sf_client_default': sf_client_default,
         'sf_client_a': sf_client_a,
         'sf_client_b': sf_client_b,
         'ms_client': ms_client,
         'zhipu_client': zhipu_client,
+        'gemini': gemini_client_1
     }
 
 

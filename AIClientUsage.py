@@ -194,8 +194,10 @@ def setup_client_manager():
     # [client_manager.register_client(client) for client in clients]
 
     # Or register specified client.
-    specified_client = clients['zhipu_client']
+    specified_client = clients['gemini']
     client_manager.register_client(specified_client)
+
+    print(specified_client.get_model_list())
 
     return client_manager
 

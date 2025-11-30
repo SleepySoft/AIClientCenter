@@ -10,3 +10,4 @@ uvicorn
 jinja2
 
 zai-sdk
+# google-generativeai
