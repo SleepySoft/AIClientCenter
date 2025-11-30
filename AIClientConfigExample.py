@@ -77,8 +77,8 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     # -- Start token rotator --
 
-    sf_rotator_a.run_in_thread()
-    sf_rotator_b.run_in_thread()
+    # sf_rotator_a.run_in_thread()
+    # sf_rotator_b.run_in_thread()
 
     # -------------- Model scope client --------------
     # - Daily refresh invoking times limit.
@@ -136,7 +136,7 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     gemini_api_1 = GoogleGeminiAdapter(
         api_key='AIzaSyDQFb29QyRMTBpPAhoaLED23vu-mG0gb-k',
-        model='gemini-2.5-flash-lite',
+        model='gemini-2.5-flash',
         proxy='http://127.0.0.1:10809'
     )
     gemini_client_1 = StandardOpenAIClient(

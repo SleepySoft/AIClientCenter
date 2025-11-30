@@ -1,5 +1,7 @@
 import logging
 import json
+import time
+
 import requests
 from typing import List, Dict, Any, Optional
 
@@ -42,25 +44,35 @@ class GoogleGeminiAdapter:
 
     def get_model_list(self) -> Dict[str, Any]:
         """
-        Fetches model list via HTTP v1alpha.
+        Fetches model list with retry logic.
         """
         url = f"{self.base_url}?key={self.api_key}"
-        try:
-            resp = requests.get(url, proxies=self._get_proxies(), timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
+        # 简单重试 3 次
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    url,
+                    proxies=self._get_proxies(),
+                    timeout=10,
+                    headers={"Connection": "close"}  # 关键：防止复用死连接
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            models = []
-            for m in data.get("models", []):
-                if "generateContent" in m.get("supportedGenerationMethods", []):
-                    models.append({
-                        "id": m["name"].replace("models/", ""),
-                        "object": "model"
-                    })
-            return {"data": models}
-        except Exception as e:
-            logger.error(f"Failed to fetch models: {e}")
-            return {"data": []}
+                models = []
+                for m in data.get("models", []):
+                    if "generateContent" in m.get("supportedGenerationMethods", []):
+                        models.append({
+                            "id": m["name"].replace("models/", ""),
+                            "object": "model"
+                        })
+                return {"data": models}
+            except Exception as e:
+                logger.warning(f"Fetch models failed (Attempt {attempt + 1}): {e}")
+                time.sleep(1)
+
+        # 如果全失败，返回空
+        return {"data": []}
 
     def _convert_messages(self, messages: List[Dict[str, str]]) -> tuple[Optional[Dict], List[Dict]]:
         system_instruction = None
@@ -92,8 +104,7 @@ class GoogleGeminiAdapter:
         target_model = model or self.model
         target_model = target_model.replace("models/", "")
 
-        # 使用 v1alpha 接口
-        url = f"https://generativelanguage.googleapis.com/v1alpha/models/{target_model}:streamGenerateContent?key={self.api_key}"
+        url = f"{self.base_url}/{target_model}:streamGenerateContent?key={self.api_key}"
 
         system_instruction, contents = self._convert_messages(messages)
 
@@ -113,88 +124,105 @@ class GoogleGeminiAdapter:
         if system_instruction:
             payload["system_instruction"] = system_instruction
 
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                proxies=self._get_proxies(),
-                stream=True,
-                timeout=60
-            )
-            response.raise_for_status()
+        # ==========================
+        # 🛡️ 增强部分：重试循环
+        # ==========================
+        max_retries = 3
+        last_exception = None
 
-            full_content = ""
-            finish_reason = "stop"
-            usage_info = {}
+        for attempt in range(max_retries):
+            try:
+                # 显式创建 Session 以应用 Connection: close
+                with requests.Session() as s:
+                    response = s.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Connection": "close"  # 关键：禁用 Keep-Alive，防止 SSL EOF
+                        },
+                        proxies=self._get_proxies(),
+                        stream=True,
+                        timeout=60
+                    )
 
-            # === 新版解析器：支持多行 JSON ===
-            buffer = ""
+                    # 遇到 429 也进行重试
+                    if response.status_code == 429:
+                        wait = 2 * (attempt + 1)
+                        logger.warning(f"Rate Limit 429. Sleeping {wait}s...")
+                        time.sleep(wait)
+                        continue
 
-            for line in response.iter_lines():
-                if not line: continue
-                # 注意：这里不要 strip()，保留空格以防拼坏字符串，但要 decode
-                decoded_part = line.decode('utf-8')
+                    response.raise_for_status()
 
-                # 过滤掉最外层的数组括号（通常单独一行）
-                stripped = decoded_part.strip()
-                if stripped == '[' or stripped == ']':
-                    continue
-
-                buffer += decoded_part
-
-                # 尝试解析 Buffer
-                try:
-                    # 预处理：去掉 buffer 结尾可能的逗号，否则 json.loads 会报错
-                    text_to_check = buffer.strip()
-                    if text_to_check.startswith(','):
-                        text_to_check = text_to_check[1:]
-                    if text_to_check.endswith(','):
-                        text_to_check = text_to_check[:-1]
-
-                    chunk = json.loads(text_to_check)
-
-                    # --- 如果解析成功，说明凑齐了一个完整对象 ---
-
-                    # 1. 处理数据
-                    candidates = chunk.get("candidates", [])
-                    if candidates:
-                        candidate = candidates[0]
-                        parts = candidate.get("content", {}).get("parts", [])
-                        if parts:
-                            full_content += parts[0].get("text", "")
-                        if "finishReason" in candidate:
-                            finish_reason = candidate["finishReason"]
-
-                    if "usageMetadata" in chunk:
-                        usage_info = chunk["usageMetadata"]
-
-                    # 2. 清空缓冲区，准备接收下一个对象
+                    full_content = ""
+                    finish_reason = "stop"
+                    usage_info = {}
                     buffer = ""
 
-                except json.JSONDecodeError:
-                    # 解析失败，说明 JSON 还没接收全，继续循环读下一行
-                    continue
+                    for line in response.iter_lines():
+                        if not line: continue
+                        decoded_part = line.decode('utf-8')
 
-            return {
-                "id": "gen-google-rest",
-                "object": "chat.completion",
-                "created": 0,
-                "model": target_model,
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": full_content},
-                    "finish_reason": finish_reason
-                }],
-                "usage": {
-                    "prompt_tokens": usage_info.get("promptTokenCount", 0),
-                    "completion_tokens": usage_info.get("candidatesTokenCount", 0),
-                    "total_tokens": usage_info.get("totalTokenCount", 0)
-                }
-            }
+                        stripped = decoded_part.strip()
+                        if stripped == '[' or stripped == ']': continue
 
-        except Exception as e:
-            logger.error(f"Gemini REST API Error: {e}")
-            raise e
+                        buffer += decoded_part
+                        try:
+                            # 去掉尾部逗号
+                            text_to_check = buffer.strip()
+                            if text_to_check.startswith(','): text_to_check = text_to_check[1:]
+                            if text_to_check.endswith(','): text_to_check = text_to_check[:-1]
 
+                            chunk = json.loads(text_to_check)
+
+                            # 解析成功，提取数据
+                            candidates = chunk.get("candidates", [])
+                            if candidates:
+                                candidate = candidates[0]
+                                parts = candidate.get("content", {}).get("parts", [])
+                                if parts:
+                                    full_content += parts[0].get("text", "")
+                                if "finishReason" in candidate:
+                                    finish_reason = candidate["finishReason"]
+
+                            if "usageMetadata" in chunk:
+                                usage_info = chunk["usageMetadata"]
+
+                            buffer = ""  # 清空
+                        except json.JSONDecodeError:
+                            continue
+
+                    # 成功获取完整流，直接返回
+                    return {
+                        "id": "gen-google-rest",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": target_model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": full_content},
+                            "finish_reason": finish_reason
+                        }],
+                        "usage": {
+                            "prompt_tokens": usage_info.get("promptTokenCount", 0),
+                            "completion_tokens": usage_info.get("candidatesTokenCount", 0),
+                            "total_tokens": usage_info.get("totalTokenCount", 0)
+                        }
+                    }
+
+            except (requests.exceptions.SSLError, requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ConnectionError) as e:
+                # 捕获 SSL/网络 断开错误
+                logger.warning(f"Network Error (Attempt {attempt + 1}/{max_retries}): {e}")
+                last_exception = e
+                time.sleep(1 + attempt)  # 稍微睡一会再试
+                continue
+
+            except Exception as e:
+                logger.error(f"Unrecoverable Error: {e}")
+                raise e
+
+        # 如果循环结束还没返回，说明重试次数用尽
+        raise last_exception or Exception("Max retries exceeded")
 
