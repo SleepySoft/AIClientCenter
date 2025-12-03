@@ -296,6 +296,9 @@ class OpenAICompatibleAPI:
     # Public API Methods
     # --------------------------------------------------------------------------
 
+    def get_using_model(self) -> str:
+        return self.using_model
+
     def get_model_list(self) -> Union[Dict[str, Any], requests.Response]:
         """Synchronously retrieves the list of available models."""
         if not self._api_token: return {'error': 'Missing API token'}
