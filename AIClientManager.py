@@ -1024,6 +1024,8 @@ class AIClientManager:
                 continue
 
             try:
+                # Temporary add delay
+                time.sleep(60)
                 self._check_client_health()
                 # - Do not clean up the unavailable clients.
                 # - Because the limit will be reset by time or by changing token.

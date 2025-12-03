@@ -1,20 +1,21 @@
 import os
 import json
-import time
-import asyncio
-import aiohttp
 import backoff
 import logging
+import asyncio
 import requests
 import threading
+from typing import Optional, Dict, Any, Union, List
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from typing import Optional, Dict, Any, Union, List
 
+# --- Optional Dependencies ---
 try:
     import aiohttp
-except:
+    from aiohttp import TCPConnector
+except ImportError:
     aiohttp = None
+    TCPConnector = None
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,10 @@ Siliconflow Reply example:
 }
 """
 
-# --- Helper constants and functions for retry logic ---
+# --- Constants & Helpers ---
 
-# Status codes that are safe to retry on
+# HTTP Status codes that generally indicate a temporary issue safe to retry.
+
 RETRYABLE_STATUS_CODES = {
     429,  # Too Many Requests
     500,  # Internal Server Error
@@ -59,436 +61,316 @@ RETRYABLE_STATUS_CODES = {
     524
 }
 
-# Exceptions that indicate a transient (retryable) async error
-RETRYABLE_ASYNC_EXCEPTIONS = (
-    asyncio.TimeoutError,
-    aiohttp.ClientConnectionError
-)
-
+# Construct the tuple of async exceptions to catch during retries.
+# This prevents NameError if aiohttp is not installed.
+_async_retry_exceptions = [asyncio.TimeoutError]
+if aiohttp:
+    _async_retry_exceptions.extend([
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientResponseError,
+        aiohttp.ServerDisconnectedError
+    ])
+RETRYABLE_ASYNC_EXCEPTIONS = tuple(_async_retry_exceptions)
 
 LLM_DEFAULT_TIMEOUT_S = 5 * 60
 
 
 def is_retryable_async_error(e: Exception) -> bool:
     """
-    Check if an exception from aiohttp is transient and can be retried.
-
-    Args:
-        e (Exception): The exception that was raised.
-
-    Returns:
-        bool: True if the error is retryable, False otherwise.
+    Determines if an asynchronous exception is transient and worth retrying.
+    Handles network timeouts, connection drops, and specific HTTP 5xx/429 errors.
     """
-    # Check for network/timeout errors first
-    if isinstance(e, RETRYABLE_ASYNC_EXCEPTIONS):
+    if not aiohttp:
+        return isinstance(e, asyncio.TimeoutError)
+
+    # 1. Network-level errors (timeouts, connection reset)
+    if isinstance(e, (asyncio.TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError)):
         return True
 
-    # Check for HTTP response errors with a retryable status code
+    # 2. HTTP Response errors (check status code)
     if isinstance(e, aiohttp.ClientResponseError):
         return e.status in RETRYABLE_STATUS_CODES
 
-    # All other exceptions are not retryable
     return False
-
-
-# --- End of helper definitions ---
 
 
 class OpenAICompatibleAPI:
     """
-    A client class to interact with OpenAI-like API services.
+    A robust client for OpenAI-compatible API services.
 
-    This class provides a flexible way to communicate with APIs that are compatible with OpenAI's interface.
-    It supports both synchronous and asynchronous requests and provides token authentication handling.
-
-    It also implements robust exponential backoff retries for both sync and async requests.
-    - Sync methods use requests.Session with urllib3.Retry.
-    - Async methods use the @backoff decorator.
-
-    Attributes:
-        api_base_url (str): The base URL of the API service.
-        _api_token (str): Authentication token for the API.
-        default_model (str): Default model to use when making requests.
-        proxies (dict): Proxies to use for requests.
-        sync_session (requests.Session): A session for synchronous requests with retry logic.
+    Key Features:
+    1. **Dual Mode:** Supports both Synchronous (requests) and Asynchronous (aiohttp) operations.
+    2. **Auto-Healing Sync Sessions:** Automatically detects broken connection pools or stale proxies
+       in synchronous mode and resets the session to recover connectivity.
+    3. **Efficient Async Resource Management:** Uses a shared, lazy-loaded aiohttp session to prevent
+       TCP socket exhaustion/port starvation during high concurrency.
+    4. **Smart Retries:** Implements exponential backoff for rate limits (429) and server errors.
     """
 
     def __init__(self, api_base_url: str, token: Optional[str] = None,
                  default_model: str = "gpt-3.5-turbo", proxies: dict = None):
         """
-        Initialize the OpenAI-compatible API client.
-
         Args:
-            api_base_url (str): The base URL of the API service.
-            token (Optional[str]): Authentication token for the API. If not provided, it will be fetched from environment variables.
-            default_model (str): Default model to use when making requests.
-            proxies (dict): Proxies to use for requests.
-
-        Raises:
-            ValueError: If token is not provided and not found in environment variables.
+            api_base_url: The base endpoint (e.g., 'https://api.openai.com/v1').
+            token: API Key. Defaults to OPENAI_API_KEY env var if not provided.
+            default_model: The model name to use if not specified in requests.
+            proxies: Dictionary for HTTP/HTTPS proxies.
         """
         self.api_base_url = api_base_url.strip()
-
-        # Try to get token from environment variables if not provided
         self._api_token = token or os.getenv("OPENAI_API_KEY")
-
         self.default_model = default_model
         self.using_model = default_model
         self.proxies = proxies or {}
 
-        # This lock protects self.api_token, which is read by both sync and async methods
+        # Thread-safe lock for token updates
         self.lock = threading.Lock()
 
-        # Create a persistent session for synchronous requests
-        # This session will handle connection pooling and retries automatically
+        # Initialize the synchronous session immediately
         self.sync_session = self._create_sync_session()
 
-    def _create_sync_session(self) -> requests.Session:
-        """
-        Create a requests.Session configured with exponential backoff.
+        # Placeholder for the asynchronous session (initialized lazily)
+        self._async_session: Optional[Any] = None
 
-        Returns:
-            requests.Session: A session object with retry logic mounted.
-        """
-        session = requests.Session()
-
-        retry_strategy = Retry(
-            total=5,  # [修改] 增加重试次数，从3改为5
-            backoff_factor=2,  # [修改] 增加退避因子。
-            # factor=2 意味着重试间隔为: 1s, 2s, 4s, 8s, 16s...
-            # 原来的 factor=1 只有 0.5s, 1s... 对429来说太快了
-            status_forcelist=list(RETRYABLE_STATUS_CODES),
-            allowed_methods=["GET", "POST"],
-            # [新增] 尊重服务端返回的 Retry-After 头 (如果有)
-            respect_retry_after_header=True
-        )
-
-        # Create an adapter and mount the retry strategy
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-
-        # Set default headers and proxies for the session
-        session.headers.update({
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_token}"
-        })
-        session.proxies = self.proxies
-
-        return session
-
-    def _construct_url(self, endpoint: str) -> str:
-        """Construct the full URL for a given API endpoint."""
-        base = self.api_base_url.rstrip('/')
-        return f"{base}/{endpoint}"
-
-    def _prepare_request_data(self,
-                              model: Optional[str] = None,
-                              messages: Optional[List[Dict[str, str]]] = None,
-                              **kwargs) -> Dict[str, Any]:
-        """
-        Prepare data for the API request.
-
-        Args:
-            model (Optional[str]): Model to use for the request. Defaults to the client's default_model.
-            messages (Optional[List[Dict[str, str]]]): List of message objects for chat completion.
-            **kwargs: Additional parameters to include in the request.
-
-        Returns:
-            Dict[str, Any]: Prepared request data.
-        """
-        self.using_model = model or self.default_model
-        request_data = {
-            "model": self.using_model,
-            **kwargs
-        }
-
-        # Add messages if provided for chat completion
-        if messages:
-            request_data["messages"] = messages
-
-        return request_data
+    # --------------------------------------------------------------------------
+    # Authentication Management
+    # --------------------------------------------------------------------------
 
     def get_api_token(self) -> str:
         with self.lock:
             return self._api_token
 
     def set_api_token(self, token: str):
-        """Safely update the API token for both sync and async methods."""
+        """
+        Updates the API token at runtime for both sync and async requests.
+        """
         with self.lock:
             old_token = self._api_token
             self._api_token = token
-            # Update the token in the persistent synchronous session
-            self.sync_session.headers["Authorization"] = f"Bearer {self._api_token}"
-            if old_token:
-                logger.info(f'Change API key from {old_token[:16]} to {token[:16]}.')
-            else:
-                logger.info(f'Set API key: {token[:16]}.')
 
-    def get_header(self) -> dict:
-        """
-        Get headers for async requests.
-        Note: Sync requests use self.sync_session which manages its own headers.
-        """
+            # Immediately update the header in the active sync session
+            if self.sync_session:
+                self.sync_session.headers["Authorization"] = f"Bearer {self._api_token}"
+
+            logger.info(f'API key updated. (Ends with: ...{token[-4:] if token else "None"})')
+
+    def _get_dynamic_header(self) -> dict:
+        """Returns fresh headers (useful for async requests where session is shared)."""
         with self.lock:
             return {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_token}"
             }
 
-    def get_model_list(self) -> Union[Dict[str, Any], requests.Response]:
-        """
-        Get the list of available models from the API.
-        Retries are handled automatically by self.sync_session.
+    # --------------------------------------------------------------------------
+    # Synchronous Core Logic (Auto-Healing)
+    # --------------------------------------------------------------------------
 
-        Returns:
-            Union[Dict[str, Any], requests.Response]: The API response, either as a parsed dictionary or the raw response object.
-        """
-        if not self._api_token:
-            return {'error': 'invalid api token'}
+    def _create_sync_session(self) -> requests.Session:
+        """Configures a new requests.Session with connection pooling and basic retries."""
+        session = requests.Session()
 
-        url = self._construct_url("models")
-
-        try:
-            # Use the pre-configured session. Headers, proxies, and retries are automatic.
-            response = self.sync_session.get(url, timeout=LLM_DEFAULT_TIMEOUT_S)  # Add a reasonable timeout
-
-            # If retries failed, status_code will be the last error (e.g., 503)
-            return response.json() if response.status_code == 200 else response
-
-        except requests.exceptions.RequestException as e:
-            # This catches errors if all retries fail (e.g., ConnectionError)
-            logger.error(f"Max retries exceeded for get_model_list: {e}")
-            return {'error': f'Max retries reached. Last error: {str(e)}'}
-
-    def get_using_model(self) -> str:
-        return self.using_model
-
-    def create_chat_completion_sync(self,
-                                    messages: List[Dict[str, str]],
-                                    model: Optional[str] = None,
-                                    temperature: float = 0.7,
-                                    max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
-        """
-        Create a chat completion synchronously.
-        Retries are handled automatically by self.sync_session.
-
-        Args:
-            messages (List[Dict[str, str]]): List of message objects for the conversation.
-            model (Optional[str]): Model to use for the completion. Defaults to the client's default_model.
-            temperature (float): Controls randomness. Lower values give more deterministic results.
-            max_tokens (int): Maximum number of tokens to generate in the response.
-
-        Returns:
-            Union[Dict[str, Any], requests.Response]: The API response, either as a parsed dictionary or the raw response object.
-
-        Note:
-            The messages should be in the format of [{"role": "system", "content": "System message"},
-                                                   {"role": "user", "content": "User message"}].
-        """
-        if not self._api_token:
-            return {'error': 'invalid api token'}
-
-        url = self._construct_url("chat/completions")
-        data = self._prepare_request_data(
-            model=model ,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens
+        # Configure connection pool size to handle multithreaded usage
+        adapter = HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=Retry(
+                total=3,  # Low-level TCP retries
+                backoff_factor=1,
+                status_forcelist=list(RETRYABLE_STATUS_CODES),
+                allowed_methods=["GET", "POST"],
+                respect_retry_after_header=True
+            )
         )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
 
-        try:
-            # Use the pre-configured session.
-            response = self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))  # Longer timeout for generation
+        session.headers.update(self._get_dynamic_header())
+        session.proxies = self.proxies
+        return session
 
-            # Return parsed JSON if successful, otherwise return the raw response
-            return response.json() if response.status_code == 200 else response
-
-        except requests.exceptions.RequestException as e:
-            # This catches errors if all retries fail
-            logger.error(f"Max retries exceeded for create_chat_completion_sync: {e}")
-            return {'error': f'Max retries reached. Last error: {str(e)}'}
-
-    @backoff.on_exception(
-        backoff.expo,
-        RETRYABLE_ASYNC_EXCEPTIONS,
-        max_tries=6,    # 增加尝试次数 (1次正常 + 5次重试)
-        base=2,         # 增加底数，让指数增长更明显 (2, 4, 8...)
-        factor=3,       # 乘数因子，进一步拉大间隔
-        max_time=120,   # 总重试时间不超过 120 秒
-        giveup=lambda e: not is_retryable_async_error(e)
-    )
-    async def create_chat_completion_async(self,
-                                           messages: List[Dict[str, str]],
-                                           model: Optional[str] = None,
-                                           temperature: float = 0.7,
-                                           max_tokens: int = 4096) -> Dict[str, Any]:
+    def _reset_sync_session(self):
         """
-        Create a chat completion asynchronously.
-        Retries are handled by the @backoff decorator.
+        CRITICAL: Forcefully closes and recreates the synchronous session.
 
-        Args:
-            messages (List[Dict[str, str]]): List of message objects for the conversation.
-            model (Optional[str]): Model to use for the completion. Defaults to the client's default_model.
-            temperature (float): Controls randomness. Lower values give more deterministic results.
-            max_tokens (int): Maximum number of tokens to generate in the response.
-
-        Returns:
-            Dict[str, Any]: The API response as a parsed dictionary.
-
-        Raises:
-            aiohttp.ClientResponseError: If all retries fail with an HTTP error.
-            aiohttp.ClientConnectionError: If all retries fail with a connection error.
-
-        Note:
-            Requires asyncio and aiohttp to be installed and used within an async context.
-            The messages should be in the format of [{"role": "system", "content": "System message"},
-                                                   {"role": "user", "content": "User message"}].
+        This is used to recover from 'zombie' connections where the client believes
+        a TCP connection is open, but the server/proxy has dropped it.
         """
-        if not self._api_token:
-            return {'error': 'invalid api token'}
-        if not aiohttp:
-            return {'error': 'aiohttp not installed'}
-
-        url = self._construct_url("chat/completions")
-        data = self._prepare_request_data(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-
-        # 优化超时设置：连接超时短(10s)，读取超时长(300s)
-        # 这样如果服务器挂了连不上，可以快速触发重试，而不是干等 5 分钟
-        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
-
-        # [注意] 最佳实践是将 session 作为类属性复用，而不是每次创建。
-        # 但为了不破坏你现有的代码结构，这里仅优化 context manager。
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        with self.lock:
             try:
-                async with session.post(
-                        url,
-                        headers=self.get_header(),
-                        json=data,
-                        proxy=self._get_url_proxy(url)
-                ) as response:
-                    # 必须在这里针对 429/503 抛出异常，backoff 才能捕获
-                    response.raise_for_status()
-                    return await response.json()
-            except aiohttp.ClientResponseError as e:
-                # 显式记录 429 错误，方便调试
-                if e.status == 429:
-                    logger.warning(f"Rate limit hit (429) for model {self.using_model}. Retrying...")
-                raise e
+                logger.warning("Reseting synchronous session to recover from connection error...")
+                self.sync_session.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            self.sync_session = self._create_sync_session()
 
-    def create_completion_sync(self,
-                               prompt: str,
-                               model: Optional[str] = None,
-                               temperature: float = 0.7,
-                               max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
+    def _post_sync(self, endpoint: str, data: dict) -> Union[Dict[str, Any], requests.Response]:
         """
-        Create a text completion synchronously.
-        Retries are handled automatically by self.sync_session.
-
-        Args:
-            prompt (str): The text prompt to generate completion for.
-            model (Optional[str]): Model to use for the completion. Defaults to the client's default_model.
-            temperature (float): Controls randomness. Lower values give more deterministic results.
-            max_tokens (int): Maximum number of tokens to generate in the response.
-
-        Returns:
-            Union[Dict[str, Any], requests.Response]: The API response, either as a parsed dictionary or the raw response object.
+        Internal wrapper for synchronous POST requests.
+        Handles URL construction, error logging, and triggers session reset on failure.
         """
-        if not self._api_token:
-            return {'error': 'invalid api token'}
-
-        url = self._construct_url("completions")
-        data = self._prepare_request_data(
-            model=model,
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        url = self._construct_url(endpoint)
 
         try:
-            # Use the pre-configured session.
+            # Attempt request with standard timeout
             response = self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
 
-            # Return parsed JSON if successful, otherwise return the raw response
-            return response.json() if response.status_code == 200 else response
+            if response.status_code == 200:
+                return response.json()
+
+            logger.error(f"Sync request to {endpoint} failed ({response.status_code}): {response.text[:200]}")
+            return response
 
         except requests.exceptions.RequestException as e:
-            # This catches errors if all retries fail
-            logger.error(f"Max retries exceeded for create_completion_sync: {e}")
-            return {'error': f'Max retries reached. Last error: {str(e)}'}
+            # On any connection error (timeout, DNS, proxy fail), assume the session is tainted.
+            logger.error(f"Critical sync connection error: {e}. Triggering session reset.")
+            self._reset_sync_session()
+            return {'error': f'Connection failed and session reset. Last error: {str(e)}'}
+
+    # --------------------------------------------------------------------------
+    # Asynchronous Core Logic (Shared Session)
+    # --------------------------------------------------------------------------
+
+    async def _get_async_session(self):
+        """
+        Retrieves the existing async session or creates a new one if it's closed/missing.
+        Uses a shared session to preserve TCP connections (Keep-Alive).
+        """
+        if self._async_session is not None and not self._async_session.closed:
+            # Ensure the session belongs to the current running loop
+            if self._async_session.loop is asyncio.get_running_loop():
+                return self._async_session
+            await self._async_session.close()
+
+        # Configure connector limits to prevent ephemeral port exhaustion
+        connector = TCPConnector(limit=100, limit_per_host=20) if TCPConnector else None
+
+        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
+
+        self._async_session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+            headers=self._get_dynamic_header()
+        )
+        return self._async_session
 
     @backoff.on_exception(
         backoff.expo,
         RETRYABLE_ASYNC_EXCEPTIONS,
-        max_tries=6,    # 增加尝试次数 (1次正常 + 5次重试)
-        base=2,         # 增加底数，让指数增长更明显 (2, 4, 8...)
-        factor=3,       # 乘数因子，进一步拉大间隔
-        max_time=120,   # 总重试时间不超过 120 秒
+        max_tries=6,
+        base=2,
+        factor=3,
+        max_time=120,
         giveup=lambda e: not is_retryable_async_error(e)
     )
-    async def create_completion_async(self,
-                                      prompt: str,
-                                      model: Optional[str] = None,
-                                      temperature: float = 0.7,
-                                      max_tokens: int = 4096) -> Dict[str, Any]:
+    async def _post_async(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Create a text completion asynchronously.
-        Retries are handled by the @backoff decorator.
-
-        Args:
-            prompt (str): The text prompt to generate completion for.
-            model (Optional[str]): Model to use for the completion. Defaults to the client's default_model.
-            temperature (float): Controls randomness. Lower values give more deterministic results.
-            max_tokens (int): Maximum number of tokens to generate in the response.
-
-        Returns:
-            Dict[str, Any]: The API response as a parsed dictionary.
-
-        Raises:
-            aiohttp.ClientResponseError: If all retries fail with an HTTP error.
-            aiohttp.ClientConnectionError: If all retries fail with a connection error.
-
-        Note:
-            Requires asyncio and aiohttp to be installed and used within an async context.
+        Internal wrapper for asynchronous POST requests.
+        Handles Backoff retries, Rate Limits (429), and JSON parsing.
         """
-        if not self._api_token:
-            return {'error': 'invalid api token'}
-        if not aiohttp:
-            return {'error': 'aiohttp not installed'}
+        if not self._api_token: return {'error': 'Missing API token'}
+        if not aiohttp: return {'error': 'aiohttp library not installed'}
 
-        url = self._construct_url("completions")
-        data = self._prepare_request_data(
-            model=model,
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        session = await self._get_async_session()
+        url = self._construct_url(endpoint)
 
-        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
             async with session.post(
                     url,
-                    headers=self.get_header(),
                     json=data,
+                    headers=self._get_dynamic_header(),  # Inject latest token
                     proxy=self._get_url_proxy(url)
             ) as response:
+
+                if response.status == 429:
+                    logger.warning(f"Async Rate Limit (429) hit for {endpoint}. Backoff will retry...")
+
+                # Check for HTTP errors; this triggers the @backoff decorator
                 response.raise_for_status()
                 return await response.json()
 
+        except aiohttp.ClientConnectorError as e:
+            logger.warning(f"Async connection error to {url}: {e}")
+            raise  # Re-raise to trigger backoff
+
+    # --------------------------------------------------------------------------
+    # Public API Methods
+    # --------------------------------------------------------------------------
+
+    def get_model_list(self) -> Union[Dict[str, Any], requests.Response]:
+        """Synchronously retrieves the list of available models."""
+        if not self._api_token: return {'error': 'Missing API token'}
+
+        url = self._construct_url("models")
+        try:
+            response = self.sync_session.get(url, timeout=LLM_DEFAULT_TIMEOUT_S)
+            return response.json() if response.status_code == 200 else response
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get model list: {e}")
+            self._reset_sync_session()
+            return {'error': str(e)}
+
+    def create_chat_completion_sync(self, messages: List[Dict], model: str = None,
+                                    temperature: float = 0.7, max_tokens: int = 4096):
+        """Creates a chat completion (Synchronous)."""
+        if not self._api_token: return {'error': 'Missing API token'}
+        data = self._prepare_request_data(model=model, messages=messages,
+                                          temperature=temperature, max_tokens=max_tokens)
+        return self._post_sync("chat/completions", data)
+
+    def create_completion_sync(self, prompt: str, model: str = None,
+                               temperature: float = 0.7, max_tokens: int = 4096):
+        """Creates a text completion (Synchronous)."""
+        if not self._api_token: return {'error': 'Missing API token'}
+        data = self._prepare_request_data(model=model, prompt=prompt,
+                                          temperature=temperature, max_tokens=max_tokens)
+        return self._post_sync("completions", data)
+
+    async def create_chat_completion_async(self, messages: List[Dict], model: str = None,
+                                           temperature: float = 0.7, max_tokens: int = 4096):
+        """Creates a chat completion (Asynchronous)."""
+        data = self._prepare_request_data(model=model, messages=messages,
+                                          temperature=temperature, max_tokens=max_tokens)
+        return await self._post_async("chat/completions", data)
+
+    async def create_completion_async(self, prompt: str, model: str = None,
+                                      temperature: float = 0.7, max_tokens: int = 4096):
+        """Creates a text completion (Asynchronous)."""
+        data = self._prepare_request_data(model=model, prompt=prompt,
+                                          temperature=temperature, max_tokens=max_tokens)
+        return await self._post_async("completions", data)
+
+    async def close(self):
+        """
+        Gracefully closes both synchronous and asynchronous sessions.
+        Should be called when the application is shutting down.
+        """
+        if self.sync_session:
+            self.sync_session.close()
+
+        if self._async_session and not self._async_session.closed:
+            await self._async_session.close()
+
+    # --------------------------------------------------------------------------
+    # Internal Utilities
+    # --------------------------------------------------------------------------
+
+    def _construct_url(self, endpoint: str) -> str:
+        """Joins the base URL with the endpoint."""
+        base = self.api_base_url.rstrip('/')
+        return f"{base}/{endpoint}"
 
     def _get_url_proxy(self, url: str) -> Optional[str]:
-        """Helper to get the correct proxy (http/https) for aiohttp."""
-        if not self.proxies:
-            return None
+        """Selects the correct proxy based on the URL scheme (http vs https)."""
+        if not self.proxies: return None
         return self.proxies.get("https") if url.startswith("https") else self.proxies.get("http")
 
+    def _prepare_request_data(self, model=None, messages=None, **kwargs) -> Dict[str, Any]:
+        """Standardizes the payload for OpenAI-compatible endpoints."""
+        self.using_model = model or self.default_model
+        request_data = {"model": self.using_model, **kwargs}
+        if messages:
+            request_data["messages"] = messages
+        return request_data
 
 # ----------------------------------------------------------------------------------------------------------------------
 
