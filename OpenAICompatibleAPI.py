@@ -318,7 +318,7 @@ class OpenAICompatibleAPI:
         """
         url = self._construct_url(endpoint)
 
-        if not self._api_token or not aiohttp:··
+        if not self._api_token or not aiohttp:
             # 使用统一的错误处理函数进行检查
             if not self._api_token:
                 return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")

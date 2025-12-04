@@ -15,6 +15,8 @@ from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 
+from AIClientCenter.APIResult import APIResult
+
 logger = logging.getLogger(__name__)
 
 CLIENT_PRIORITY_MOST_PRECIOUS = 100  # Precious API resource has the lowest using priority.
