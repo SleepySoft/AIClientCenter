@@ -93,6 +93,39 @@ def is_retryable_async_error(e: Exception) -> bool:
     return False
 
 
+def _should_giveup(e):
+    # 1. 致命：如果是读取超时（AI生成超过5分钟），直接放弃！
+    #    因为重试意味着你会再傻等5分钟。
+    if isinstance(e, ReadTimeout):
+        logger.error("ReadTimeout detected (AI took too long). Giving up immediately.")
+        return True
+
+    # 2. 致命：如果是 SSL 错误或其他非网络错误，放弃。
+    if isinstance(e, SSLError):
+        return True
+
+    # 3. 重试：如果是连接超时 (ConnectTimeout) 或 网络连接错误 (ConnectionError/ProxyError)
+    #    这些通常是瞬时的，值得重试。
+    if isinstance(e, (ConnectTimeout, ConnectionError, ProxyError)):
+        return False
+
+    # 默认放弃其他未知的 RequestException
+    return True
+
+
+# --- Helper: Concise Log Handler ---
+def log_retry_attempt(details):
+    """
+    Logs a short summary of the retry attempt.
+    details is a dict provided by the backoff library.
+    """
+    exception_type = type(details['exception']).__name__
+    # Format: [Retry #1] ConnectTimeout -> Wait 0.5s
+    logger.warning(
+        f"[Retry #{details['tries']}] {exception_type} -> Wait {details['wait']:.1f}s"
+    )
+
+
 class OpenAICompatibleAPI:
     """
     A robust client for OpenAI-compatible API services.
@@ -191,27 +224,35 @@ class OpenAICompatibleAPI:
                 pass
             self.sync_session = self._create_sync_session()
 
-    # The internal posting logic, now with backoff integrated for RequestExceptions
+    # 应用到装饰器
     @backoff.on_exception(
         backoff.expo,
         (RequestException,),
-        max_tries=3,        # 降级：由 4 改为 3，快速失败
+        max_tries=3,
         base=2,
-        factor=1,
-        max_time=30,        # 总重试时间不超过 30 秒（仅针对连接阶段）
-        # 关键修改：如果是 ReadTimeout（读取超时/生成太慢），直接放弃，不要重试！
-        # 只重试：连接超时(ConnectTimeout)、连接错误(ConnectionError)、代理错误(ProxyError)
-        giveup=lambda e: isinstance(e, ReadTimeout) or not isinstance(e, (ConnectTimeout, ConnectionError, ProxyError,
-                                                                          SSLError))
+        max_time=30,  # 这里的 max_time 限制的是重试间隔的总等待时间，限制不了 requests 内部的 timeout
+        giveup=_should_giveup,
+        on_backoff=log_retry_attempt
     )
     def _attempt_sync_post(self, url: str, data: dict) -> requests.Response:
-        """
-        执行同步请求。
-        timeout=(5, 300):
-        - 5秒连接超时：连不上立刻报错，触发 Backoff 重试。
-        - 300秒读取超时：AI 思考超过 5 分钟报错，触发 giveup，不再重试。
-        """
-        return self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
+        try:
+            # timeout=(connect, read)
+            # 5s connect: fast fail for network issues
+            # LLM_DEFAULT_TIMEOUT_S read: wait for AI generation
+            resp = self.sync_session.post(
+                url,
+                json=data,
+                timeout=(5, LLM_DEFAULT_TIMEOUT_S)
+            )
+            # Log success (optional, keeping it short)
+            # logger.info(f"Req Success: {resp.status_code}")
+            return resp
+
+        except RequestException as e:
+            # Log the specific error before backoff decides to retry or raise
+            # Note: This runs BEFORE the 'log_retry_attempt' handler
+            logger.debug(f"Req Failed: {type(e).__name__} - {str(e)}")
+            raise e
 
     def _post_sync_unified(self, endpoint: str, data: dict) -> APIResult:
         """
@@ -221,28 +262,45 @@ class OpenAICompatibleAPI:
         url = self._construct_url(endpoint)
 
         try:
-            # 1. 尝试执行请求，内部已集成 backoff 对 RequestException 的重试
+            # 1. 执行请求 (Backoff 负责连接层重试，如超时/断网)
             response = self._attempt_sync_post(url, data)
-
             status = response.status_code
 
-            # 2. 成功响应 (200)
+            # 2. 成功
             if status == 200:
                 return {"success": True, "data": response.json(), "error": None}
 
-            # 3. HTTP 错误响应 (非 200) -> 归类错误
+            # -----------------------------------------------------------
+            # 3. 关键修改：细分错误类型，不要统统算作 PERMANENT
+            # -----------------------------------------------------------
 
-            # 瞬时服务器错误 (429, 5xx)
-            if status in RETRYABLE_STATUS_CODES:
+            # A. 客户端侧错误 (400-499) -> 意味着 Prompt 有问题或 Auth 错误
+            # 这种错误说明：
+            # 1. 链路通畅 (Client是好的)
+            # 2. 参数错误/内容违规 (换个 Client 也没用，不要重试)
+            if 400 <= status < 500:
+                # 特殊处理 429 (Too Many Requests) -> 这属于服务端限流，归类为瞬时错误
+                if status == 429:
+                    error_code = f"HTTP_{status}"
+                    message = f"Rate Limit Hit: {status}"
+                    return _make_error_result("TRANSIENT_SERVER", error_code, message)
+
+                # 其他 4xx (400 Bad Request, 401 Unauthorized, 403 Forbidden)
+                # 使用 "BAD_REQUEST" 类型，明确告知上层：别重试了，也没必要封禁 Client
                 error_code = f"HTTP_{status}"
-                message = f"Transient Server Error: {status} ({response.text[:100]})"
+                # 截取一小段 error message 用于调试，但不依赖它做逻辑
+                message = f"Client Side Error: {status} ({response.text[:100]})"
+                return _make_error_result("BAD_REQUEST", error_code, message)
+
+            # B. 服务端错误 (500-599) -> 意味着对方服务器挂了
+            elif 500 <= status < 600:
+                error_code = f"HTTP_{status}"
+                message = f"Server Error: {status} ({response.text[:100]})"
                 return _make_error_result("TRANSIENT_SERVER", error_code, message)
 
-            # 永久性错误 (40x)
+            # C. 其他未知状态码
             else:
-                error_code = f"HTTP_{status}"
-                message = f"Permanent Error: {status} ({response.text[:100]})"
-                return _make_error_result("PERMANENT", error_code, message)
+                return _make_error_result("PERMANENT", f"HTTP_{status}", f"Unknown Status: {status}")
 
         except RequestException as e:
             # 4. 彻底的网络连接失败 (backoff 内部重试已耗尽)

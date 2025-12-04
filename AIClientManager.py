@@ -375,42 +375,55 @@ class BaseAIClient(ABC):
     def _handle_unified_error(self, error: Dict[str, Any]) -> Dict[str, Any]:
         """
         Handles the structured error result from the underlying API_CORE.
-
-        The error dictionary must contain:
-        - "type": One of 'PERMANENT', 'TRANSIENT_SERVER', or 'TRANSIENT_NETWORK'.
-        - "code": Specific error code (e.g., HTTP_401, CONNECTION_TIMEOUT).
-        - "message": Detailed error message.
         """
         error_type = error.get('type')
-        error_code = error.get('code')
+        error_code = error.get('code', '')  # 确保默认为空字符串以便进行 in 判断
         message = error.get('message', 'No detail message provided.')
 
-        # Map API_CORE's classification to BaseAIClient's state update strategy
+        # 默认归类为 recoverable (可重试)，但在下面会被修正
+        error_category = 'recoverable'
+
+        # --- Map API_CORE's classification to BaseAIClient's state update strategy ---
+
         if error_type == "PERMANENT":
-            # Permanent errors (e.g., Bad Request, Auth Failure, Resource Not Found)
-            error_category = 'fatal'
-            self._update_client_status(ClientStatus.UNAVAILABLE)
-            logger.error(f"Permanent API Error ({error_code}): {message}")
+            error_category = 'fatal'  # 永久错误，上层业务应当停止重试
+
+            # 关键修改：区分 "内容错误(400)" 和 "账号/配置错误(401/403/404)"
+            if "HTTP_400" in str(error_code):
+                # 情况 A: 客户端没挂，是我的 Prompt 违规了
+                # 动作: 记录日志，但【不要】把 Client 设为 UNAVAILABLE
+                logger.error(
+                    f"Input/Param Error ({error_code}). Client {self.name} remains active. Message: {message[:100]}...")
+                # 这里不调用 _update_client_status，保持原样 (AVAILABLE)
+                # 也不增加错误计数 (因为不是 Client 的错)
+
+            else:
+                # 情况 B: 账号废了、找不到资源等 (401, 403, 404)
+                # 动作: 这种情况下 Client 是真的不能用了
+                self._update_client_status(ClientStatus.UNAVAILABLE)
+                self._increase_error_count()  # 只有 Client 真的出错才计数
+                logger.error(f"Permanent API Error ({error_code}): {message}")
 
         elif error_type in ["TRANSIENT_SERVER", "TRANSIENT_NETWORK"]:
-            # Transient errors (e.g., 429, 5xx, Network Timeout, Connection Errors)
+            # 瞬时错误 (5xx, Network)
             error_category = 'recoverable'
+            # 动作: 暂时标记为 ERROR 或 UNAVAILABLE，等待恢复
             self._update_client_status(ClientStatus.ERROR)
+            self._increase_error_count()
             logger.warning(f"Transient API Error ({error_code}): {message}")
 
         else:
-            # Unknown or ambiguous type
+            # 未知错误，保守处理
             error_category = 'recoverable'
             self._update_client_status(ClientStatus.ERROR)
+            self._increase_error_count()
             logger.error(f"Unknown API Error Type ({error_type}): {message}")
-
-        self._increase_error_count()
 
         return {
             'error': 'unified_api_error',
-            'error_type': error_category,  # fatal or recoverable
+            'error_type': error_category,  # fatal: 告诉上层别试了; recoverable: 告诉上层换个 Client 试试
             'api_error_code': error_code,
-            'api_error_type': error_type,  # PERMANENT/TRANSIENT_SERVER/TRANSIENT_NETWORK
+            'api_error_type': error_type,
             'message': message
         }
 
