@@ -1,5 +1,6 @@
 import os
 import json
+import socket
 import backoff
 import logging
 import asyncio
@@ -8,7 +9,8 @@ import threading
 from typing import Optional, Dict, Any, Union, List
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from requests.exceptions import RequestException, Timeout, ConnectionError
+from requests.exceptions import (RequestException, Timeout, ConnectionError,
+                                 ConnectTimeout, ReadTimeout, ProxyError, SSLError)
 
 # --- Optional Dependencies ---
 try:
@@ -66,18 +68,25 @@ def _make_error_result(error_type: str, error_code: str, message: str) -> APIRes
 
 
 def is_retryable_async_error(e: Exception) -> bool:
-    """
-    Determines if an asynchronous exception is transient and worth retrying.
-    Handles network timeouts, connection drops, and specific HTTP 5xx/429 errors.
-    """
     if not aiohttp:
         return isinstance(e, asyncio.TimeoutError)
 
-    # 1. Network-level errors (timeouts, connection reset)
-    if isinstance(e, (asyncio.TimeoutError, aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError)):
+    # 1. 连接相关的错误（网络波动，插拔网线，代理挂了） -> 应该重试
+    # 注意：aiohttp 区分 ServerDisconnected (连接断开) 和 Timeout
+    if isinstance(e, (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError)):
         return True
 
-    # 2. HTTP Response errors (check status code)
+    # 2. 特别处理 TimeoutError
+    if isinstance(e, asyncio.TimeoutError):
+        # 如果是 Socket 连接超时 (握手慢)，可以重试
+        # 但 Python 的 asyncio.TimeoutError 通常不区分得那么细，
+        # 在 backoff 语境下，建议：如果已经等了 5 分钟才超时，就别重试了，用户等不起了。
+        # 这里建议返回 False，或者依靠外部逻辑控制。
+        # 为了稳妥，我们假设“连接超时”已经被 socket timeout (5s) 捕获并抛出特定错误
+        # 而总超时通常意味着生成太慢，重试意义不大。
+        return False  # <--- 建议改为 False，超时就报错给用户，不要让用户等 10 分钟
+
+    # 3. HTTP 状态码
     if isinstance(e, aiohttp.ClientResponseError):
         return e.status in RETRYABLE_STATUS_CODES
 
@@ -163,13 +172,7 @@ class OpenAICompatibleAPI:
         adapter = HTTPAdapter(
             pool_connections=20,
             pool_maxsize=20,
-            max_retries=Retry(
-                total=2,  # Lowered internal retry, rely more on external @backoff
-                backoff_factor=1,
-                status_forcelist=list(RETRYABLE_STATUS_CODES),
-                allowed_methods=["POST"],
-                respect_retry_after_header=True
-            )
+            max_retries=0  # <--- 禁用底层重试，完全交由 backoff 接管
         )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
@@ -191,15 +194,23 @@ class OpenAICompatibleAPI:
     # The internal posting logic, now with backoff integrated for RequestExceptions
     @backoff.on_exception(
         backoff.expo,
-        (RequestException,),  # Catch all connection/timeout errors (client-side)
-        max_tries=4,  # Fewer tries, faster ultimate failure (for external handling)
+        (RequestException,),
+        max_tries=3,        # 降级：由 4 改为 3，快速失败
         base=2,
         factor=1,
-        max_time=30,  # Don't wait too long on connection failures
-        giveup=lambda e: not isinstance(e, (Timeout, ConnectionError))  # Only retry network/connection issues
+        max_time=30,        # 总重试时间不超过 30 秒（仅针对连接阶段）
+        # 关键修改：如果是 ReadTimeout（读取超时/生成太慢），直接放弃，不要重试！
+        # 只重试：连接超时(ConnectTimeout)、连接错误(ConnectionError)、代理错误(ProxyError)
+        giveup=lambda e: isinstance(e, ReadTimeout) or not isinstance(e, (ConnectTimeout, ConnectionError, ProxyError,
+                                                                          SSLError))
     )
     def _attempt_sync_post(self, url: str, data: dict) -> requests.Response:
-        """Helper function to perform the actual network request, potentially retried by backoff."""
+        """
+        执行同步请求。
+        timeout=(5, 300):
+        - 5秒连接超时：连不上立刻报错，触发 Backoff 重试。
+        - 300秒读取超时：AI 思考超过 5 分钟报错，触发 giveup，不再重试。
+        """
         return self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
 
     def _post_sync_unified(self, endpoint: str, data: dict) -> APIResult:
@@ -259,22 +270,30 @@ class OpenAICompatibleAPI:
     # --------------------------------------------------------------------------
 
     async def _get_async_session(self):
-        # 如果会话已存在且未关闭，直接返回
         if self._async_session is not None and not self._async_session.closed:
             return self._async_session
 
-        # 警告：如果存在但已关闭，意味着上次使用后没有调用 self.close()，可能是资源泄漏
         if self._async_session is not None and self._async_session.closed:
-            logger.warning("Existing async session was found closed. Creating a new one.")
-            # 此时无需 await close()，因为它已关闭
-            self._async_session = None  # 确保旧引用被释放
+            self._async_session = None
 
-        # 配置新的连接器和超时
-        # 考虑将 limit_per_host 设得更高，例如 50 或 100，以匹配 API QPS
-        connector = TCPConnector(limit=100, limit_per_host=50) if TCPConnector else None
-        timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
+        # 优化 1: 强制使用 IPv4，极大减少本地代理环境下的连接延迟
+        # limit_per_host 适当调大以支持并发
+        connector = TCPConnector(
+            limit=100,
+            limit_per_host=50,
+            family=socket.AF_INET,  # <--- 关键：强制 IPv4
+            force_close=False
+        )
 
-        # 创建新会话
+        # 优化 2: 拆分超时
+        # sock_connect: 建立连接的时间（握手），设短一点（如 5秒），连不上立刻重试
+        # sock_read: 等待数据返回的时间，设长一点（如 300秒），生成慢不要紧
+        timeout = aiohttp.ClientTimeout(
+            total=LLM_DEFAULT_TIMEOUT_S,
+            sock_connect=5,  # <--- 关键：连接超时设短，快速失败
+            sock_read=LLM_DEFAULT_TIMEOUT_S
+        )
+
         self._async_session = aiohttp.ClientSession(
             timeout=timeout,
             connector=connector,
@@ -285,10 +304,10 @@ class OpenAICompatibleAPI:
     @backoff.on_exception(
         backoff.expo,
         RETRYABLE_ASYNC_EXCEPTIONS,
-        max_tries=6,
+        max_tries=3,    # <--- 降级：由 6 改为 3。对于用户交互，试 3 次连不上基本就是挂了。
         base=2,
-        factor=3,
-        max_time=120,
+        factor=1,       # <--- 加快重试节奏
+        max_time=30,    # <--- 总共只花 30 秒尝试连接，连不上就报错。
         giveup=lambda e: not is_retryable_async_error(e)
     )
     async def _attempt_async_post(self, url: str, data: Dict[str, Any]) -> Dict[str, Any]:
