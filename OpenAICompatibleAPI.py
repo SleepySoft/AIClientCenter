@@ -8,6 +8,7 @@ import threading
 from typing import Optional, Dict, Any, Union, List
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+from requests.exceptions import RequestException, Timeout, ConnectionError
 
 # --- Optional Dependencies ---
 try:
@@ -19,34 +20,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-"""
-Siliconflow Reply example:
-{
-  "id": "0196f08d74220b683a08ca3630683a51",         # 唯一标识符，用于追踪API调用记录
-  "object": "chat.completion",                      # 标识响应类型，chat.completion表示这是聊天补全类型的响应
-  "created": 1747792524,                            # Unix时间戳，表示API请求处理完成的时间（示例值1747792524对应北京时间2025-05-21 15:55:24）
-  "model": "Qwen/Qwen3-235B-A22B",                  # 实际使用的模型标识，示例中Qwen/Qwen3-235B-A22B表明调用了第三方适配的千问模型
-  "choices": [                                      # 包含生成结果的容器，常规场景下仅有一个元素
-    {
-      "index": 0,                                   # 候选结果的序号（多候选时有效）
-      "message": {                                  # 生成的对话消息对象
-        "role": "assistant",                        # 消息来源标识（assistant表示AI生成）
-        "content": ""                               # 实际生成的文本内容 <-- **需要关注该内容**
-		},
-      "finish_reason": "stop"                       # 生成终止原因，"stop"表示自然结束
-    }
-  ],
-  "usage": {                                        # 资源消耗统计
-    "prompt_tokens": 22,                            # 输入消耗的token数
-    "completion_tokens": 254,                       # 输出消耗的token数
-    "total_tokens": 276,                            # 总token数
-    "completion_tokens_details": {                  # 扩展字段
-      "reasoning_tokens": 187                       # 推理过程消耗的token数
-    }
-  },
-  "system_fingerprint": ""                          # 系统指纹标识，用于追踪模型版本信息（示例为空说明未启用该功能）
-}
-"""
 
 # --- Constants & Helpers ---
 
@@ -73,6 +46,23 @@ if aiohttp:
 RETRYABLE_ASYNC_EXCEPTIONS = tuple(_async_retry_exceptions)
 
 LLM_DEFAULT_TIMEOUT_S = 5 * 60
+
+
+# --- Standardized Result Structure Type Hint ---
+APIResult = Dict[str, Union[bool, Optional[Dict[str, Any]]]]
+
+# --- Helper Function for Structured Error ---
+def _make_error_result(error_type: str, error_code: str, message: str) -> APIResult:
+    """Helper to create a standardized failure dictionary."""
+    return {
+        "success": False,
+        "data": None,
+        "error": {
+            "type": error_type,
+            "code": error_code,
+            "message": message
+        }
+    }
 
 
 def is_retryable_async_error(e: Exception) -> bool:
@@ -161,23 +151,23 @@ class OpenAICompatibleAPI:
                 "Authorization": f"Bearer {self._api_token}"
             }
 
-    # --------------------------------------------------------------------------
-    # Synchronous Core Logic (Auto-Healing)
-    # --------------------------------------------------------------------------
+        # --------------------------------------------------------------------------
+        # Synchronous Core Logic (Auto-Healing & Backoff Integrated)
+        # --------------------------------------------------------------------------
 
     def _create_sync_session(self) -> requests.Session:
         """Configures a new requests.Session with connection pooling and basic retries."""
         session = requests.Session()
 
-        # Configure connection pool size to handle multithreaded usage
+        # Low-level TCP Retry configuration remains the same, but now acts as first line of defense
         adapter = HTTPAdapter(
             pool_connections=20,
             pool_maxsize=20,
             max_retries=Retry(
-                total=3,  # Low-level TCP retries
+                total=2,  # Lowered internal retry, rely more on external @backoff
                 backoff_factor=1,
                 status_forcelist=list(RETRYABLE_STATUS_CODES),
-                allowed_methods=["GET", "POST"],
+                allowed_methods=["POST"],
                 respect_retry_after_header=True
             )
         )
@@ -189,63 +179,102 @@ class OpenAICompatibleAPI:
         return session
 
     def _reset_sync_session(self):
-        """
-        CRITICAL: Forcefully closes and recreates the synchronous session.
-
-        This is used to recover from 'zombie' connections where the client believes
-        a TCP connection is open, but the server/proxy has dropped it.
-        """
+        """Forcefully closes and recreates the synchronous session."""
         with self.lock:
             try:
                 logger.warning("Reseting synchronous session to recover from connection error...")
                 self.sync_session.close()
             except Exception:
-                pass  # Ignore errors during cleanup
+                pass
             self.sync_session = self._create_sync_session()
 
-    def _post_sync(self, endpoint: str, data: dict) -> Union[Dict[str, Any], requests.Response]:
+    # The internal posting logic, now with backoff integrated for RequestExceptions
+    @backoff.on_exception(
+        backoff.expo,
+        (RequestException,),  # Catch all connection/timeout errors (client-side)
+        max_tries=4,  # Fewer tries, faster ultimate failure (for external handling)
+        base=2,
+        factor=1,
+        max_time=30,  # Don't wait too long on connection failures
+        giveup=lambda e: not isinstance(e, (Timeout, ConnectionError))  # Only retry network/connection issues
+    )
+    def _attempt_sync_post(self, url: str, data: dict) -> requests.Response:
+        """Helper function to perform the actual network request, potentially retried by backoff."""
+        return self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
+
+    def _post_sync_unified(self, endpoint: str, data: dict) -> APIResult:
         """
-        Internal wrapper for synchronous POST requests.
-        Handles URL construction, error logging, and triggers session reset on failure.
+        Internal wrapper for synchronous POST requests, returns a structured APIResult.
+        Handles: backoff retries, session reset, and error categorization.
         """
         url = self._construct_url(endpoint)
 
         try:
-            # Attempt request with standard timeout
-            response = self.sync_session.post(url, json=data, timeout=(5, LLM_DEFAULT_TIMEOUT_S))
+            # 1. 尝试执行请求，内部已集成 backoff 对 RequestException 的重试
+            response = self._attempt_sync_post(url, data)
 
-            if response.status_code == 200:
-                return response.json()
+            status = response.status_code
 
-            logger.error(f"Sync request to {endpoint} failed ({response.status_code}): {response.text[:200]}")
-            return response
+            # 2. 成功响应 (200)
+            if status == 200:
+                return {"success": True, "data": response.json(), "error": None}
 
-        except requests.exceptions.RequestException as e:
-            # On any connection error (timeout, DNS, proxy fail), assume the session is tainted.
-            logger.error(f"Critical sync connection error: {e}. Triggering session reset.")
-            self._reset_sync_session()
-            return {'error': f'Connection failed and session reset. Last error: {str(e)}'}
+            # 3. HTTP 错误响应 (非 200) -> 归类错误
+
+            # 瞬时服务器错误 (429, 5xx)
+            if status in RETRYABLE_STATUS_CODES:
+                error_code = f"HTTP_{status}"
+                message = f"Transient Server Error: {status} ({response.text[:100]})"
+                return _make_error_result("TRANSIENT_SERVER", error_code, message)
+
+            # 永久性错误 (40x)
+            else:
+                error_code = f"HTTP_{status}"
+                message = f"Permanent Error: {status} ({response.text[:100]})"
+                return _make_error_result("PERMANENT", error_code, message)
+
+        except RequestException as e:
+            # 4. 彻底的网络连接失败 (backoff 内部重试已耗尽)
+
+            # 尝试修复连接池
+            try:
+                self._reset_sync_session()
+            except Exception as reset_e:
+                # 如果连重置都会失败
+                message = f"Network failure: {type(e).__name__}. Session reset failed: {reset_e}"
+                return _make_error_result("TRANSIENT_NETWORK", "SESSION_RESET_FAILED", message)
+
+            # 连接彻底失败，但会话已重置
+            error_code = "CONNECTION_TIMEOUT" if isinstance(e, Timeout) else "PROXY_FAIL"
+            message = f"Critical Network Failure ({error_code}). Session reset triggered. Last error: {e}"
+            return _make_error_result("TRANSIENT_NETWORK", error_code, message)
+
+        except Exception as e:
+            # 5. 捕获其他意料之外的系统级错误
+            message = f"Unexpected client error: {type(e).__name__}: {str(e)}"
+            return _make_error_result("PERMANENT", "UNEXPECTED_CLIENT_ERROR", message)
 
     # --------------------------------------------------------------------------
     # Asynchronous Core Logic (Shared Session)
     # --------------------------------------------------------------------------
 
     async def _get_async_session(self):
-        """
-        Retrieves the existing async session or creates a new one if it's closed/missing.
-        Uses a shared session to preserve TCP connections (Keep-Alive).
-        """
+        # 如果会话已存在且未关闭，直接返回
         if self._async_session is not None and not self._async_session.closed:
-            # Ensure the session belongs to the current running loop
-            if self._async_session.loop is asyncio.get_running_loop():
-                return self._async_session
-            await self._async_session.close()
+            return self._async_session
 
-        # Configure connector limits to prevent ephemeral port exhaustion
-        connector = TCPConnector(limit=100, limit_per_host=20) if TCPConnector else None
+        # 警告：如果存在但已关闭，意味着上次使用后没有调用 self.close()，可能是资源泄漏
+        if self._async_session is not None and self._async_session.closed:
+            logger.warning("Existing async session was found closed. Creating a new one.")
+            # 此时无需 await close()，因为它已关闭
+            self._async_session = None  # 确保旧引用被释放
 
+        # 配置新的连接器和超时
+        # 考虑将 limit_per_host 设得更高，例如 50 或 100，以匹配 API QPS
+        connector = TCPConnector(limit=100, limit_per_host=50) if TCPConnector else None
         timeout = aiohttp.ClientTimeout(total=LLM_DEFAULT_TIMEOUT_S, connect=10, sock_connect=10)
 
+        # 创建新会话
         self._async_session = aiohttp.ClientSession(
             timeout=timeout,
             connector=connector,
@@ -262,35 +291,66 @@ class OpenAICompatibleAPI:
         max_time=120,
         giveup=lambda e: not is_retryable_async_error(e)
     )
-    async def _post_async(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _attempt_async_post(self, url: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Internal wrapper for asynchronous POST requests.
-        Handles Backoff retries, Rate Limits (429), and JSON parsing.
+        Internal wrapper for asynchronous POST requests with integrated Backoff retries.
+        Raises exceptions on failure (after retries are exhausted).
         """
-        if not self._api_token: return {'error': 'Missing API token'}
-        if not aiohttp: return {'error': 'aiohttp library not installed'}
-
         session = await self._get_async_session()
+
+        async with session.post(
+                url,
+                json=data,
+                headers=self._get_dynamic_header(),  # Inject latest token
+                proxy=self._get_url_proxy(url)
+        ) as response:
+            if response.status == 429:
+                logger.warning(f"Async Rate Limit (429) hit for {url}. Backoff will retry...")
+
+            # Check for HTTP errors; this triggers the @backoff decorator or an outer try/except
+            response.raise_for_status()
+            return await response.json()
+
+    async def _post_async_unified(self, endpoint: str, data: dict) -> APIResult:
+        """
+        Internal wrapper for asynchronous POST requests, returns a structured APIResult.
+        Handles: backoff retries (via _attempt_async_post), and error categorization.
+        """
         url = self._construct_url(endpoint)
 
+        if not self._api_token or not aiohttp:··
+            # 使用统一的错误处理函数进行检查
+            if not self._api_token:
+                return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")
+            if not aiohttp:
+                return _make_error_result("PERMANENT", "MISSING_DEPENDENCY",
+                                          "aiohttp library not installed for async mode.")
         try:
-            async with session.post(
-                    url,
-                    json=data,
-                    headers=self._get_dynamic_header(),  # Inject latest token
-                    proxy=self._get_url_proxy(url)
-            ) as response:
+            # 1. 尝试执行请求 (内部已集成 backoff 重试)
+            response_json = await self._attempt_async_post(url, data)
+            return {"success": True, "data": response_json, "error": None}
 
-                if response.status == 429:
-                    logger.warning(f"Async Rate Limit (429) hit for {endpoint}. Backoff will retry...")
+        except aiohttp.ClientResponseError as e:
+            # 2. HTTP 错误响应 (非 200, 重试耗尽后抛出)
+            status = e.status
+            error_code = f"HTTP_{status}"
 
-                # Check for HTTP errors; this triggers the @backoff decorator
-                response.raise_for_status()
-                return await response.json()
+            if status in RETRYABLE_STATUS_CODES:
+                message = f"Transient Server Error (Async): {status} ({e.message})"
+                return _make_error_result("TRANSIENT_SERVER", error_code, message)
+            else:
+                message = f"Permanent Error (Async): {status} ({e.message})"
+                return _make_error_result("PERMANENT", error_code, message)
 
-        except aiohttp.ClientConnectorError as e:
-            logger.warning(f"Async connection error to {url}: {e}")
-            raise  # Re-raise to trigger backoff
+        except RETRYABLE_ASYNC_EXCEPTIONS as e:
+            # 3. 彻底的网络连接失败 (重试耗尽后抛出)
+            message = f"Critical Network Failure (Async). Last error: {e}"
+            return _make_error_result("TRANSIENT_NETWORK", "CONNECTION_TIMEOUT", message)
+
+        except Exception as e:
+            # 4. 捕获其他意料之外的系统级错误
+            message = f"Unexpected client error (Async): {type(e).__name__}: {str(e)}"
+            return _make_error_result("PERMANENT", "UNEXPECTED_CLIENT_ERROR", message)
 
     # --------------------------------------------------------------------------
     # Public API Methods
@@ -313,34 +373,39 @@ class OpenAICompatibleAPI:
             return {'error': str(e)}
 
     def create_chat_completion_sync(self, messages: List[Dict], model: str = None,
-                                    temperature: float = 0.7, max_tokens: int = 4096):
-        """Creates a chat completion (Synchronous)."""
-        if not self._api_token: return {'error': 'Missing API token'}
+                                    temperature: float = 0.7, max_tokens: int = 4096) -> APIResult:
+        """Creates a chat completion (Synchronous), returning a structured result."""
+        if not self._api_token:
+            return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")
+
         data = self._prepare_request_data(model=model, messages=messages,
                                           temperature=temperature, max_tokens=max_tokens)
-        return self._post_sync("chat/completions", data)
+        return self._post_sync_unified("chat/completions", data)
 
     def create_completion_sync(self, prompt: str, model: str = None,
-                               temperature: float = 0.7, max_tokens: int = 4096):
-        """Creates a text completion (Synchronous)."""
-        if not self._api_token: return {'error': 'Missing API token'}
+                               temperature: float = 0.7, max_tokens: int = 4096) -> APIResult:
+        """Creates a text completion (Synchronous), returning a structured result."""
+        if not self._api_token:
+            return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")
+
         data = self._prepare_request_data(model=model, prompt=prompt,
                                           temperature=temperature, max_tokens=max_tokens)
-        return self._post_sync("completions", data)
+        return self._post_sync_unified("completions", data)
 
     async def create_chat_completion_async(self, messages: List[Dict], model: str = None,
-                                           temperature: float = 0.7, max_tokens: int = 4096):
-        """Creates a chat completion (Asynchronous)."""
+                                           temperature: float = 0.7,
+                                           max_tokens: int = 4096) -> APIResult:  # <--- 注意返回类型
+        """Creates a chat completion (Asynchronous), returning a structured result."""
         data = self._prepare_request_data(model=model, messages=messages,
                                           temperature=temperature, max_tokens=max_tokens)
-        return await self._post_async("chat/completions", data)
+        return await self._post_async_unified("chat/completions", data)
 
     async def create_completion_async(self, prompt: str, model: str = None,
-                                      temperature: float = 0.7, max_tokens: int = 4096):
-        """Creates a text completion (Asynchronous)."""
+                                      temperature: float = 0.7, max_tokens: int = 4096) -> APIResult:  # <--- 注意返回类型
+        """Creates a text completion (Asynchronous), returning a structured result."""
         data = self._prepare_request_data(model=model, prompt=prompt,
                                           temperature=temperature, max_tokens=max_tokens)
-        return await self._post_async("completions", data)
+        return await self._post_async_unified("completions", data)
 
     async def close(self):
         """
@@ -374,6 +439,7 @@ class OpenAICompatibleAPI:
         if messages:
             request_data["messages"] = messages
         return request_data
+
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -415,68 +481,3 @@ def create_gemini_client(token: Optional[str] = None, model: Optional[str] = Non
         }
     )
     return client
-
-
-def main():
-    try:
-        from MyPythonUtility.DictTools import DictPrinter
-    except Exception as e:
-        print(str(e))
-        DictPrinter = None
-    finally:
-        pass
-
-    # Initialize the client - token can be passed directly or will be fetched from environment
-    client = create_gemini_client()
-
-    model_list = client.get_model_list()
-    print(f'Model list of {client.api_base_url}')
-
-    if isinstance(model_list, dict) and DictPrinter:
-        print(DictPrinter.pretty_print(model_list))
-    else:
-        print(model_list)
-
-    # Example synchronous chat completion
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "你是谁?"}
-    ]
-
-    response = client.create_chat_completion_sync(messages=messages)
-    print("Synchronous chat completion response:")
-    print(json.dumps(response, indent=2, ensure_ascii=False))
-
-    # # Example synchronous text completion
-    # prompt = "Once upon a time in a land far away,"
-    # response = client.create_completion_sync(prompt=prompt)
-    # print("\nSynchronous text completion response:")
-    # print(json.dumps(response, indent=2))
-
-    # Example asynchronous usage requires asyncio
-    import asyncio
-
-    async def async_demo():
-        # Example async chat completion
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "What is the meaning of life?"}
-        ]
-
-        response = await client.create_chat_completion_async(messages=messages)
-        print("\nAsynchronous chat completion response:")
-        print(json.dumps(response, indent=2))
-
-        # Example async text completion
-        prompt = "The capital of France is"
-        response = await client.create_completion_async(prompt=prompt)
-        print("\nAsynchronous text completion response:")
-        print(json.dumps(response, indent=2))
-
-    # Run the async demo
-    asyncio.run(async_demo())
-
-
-# Example usage
-if __name__ == "__main__":
-    main()

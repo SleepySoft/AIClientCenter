@@ -1,22 +1,27 @@
+"""
+API_CORE: Robust OpenAI-Compatible API Client
+
+This module defines the core client logic, standardized result structure (APIResult),
+and the error classification system used across all synchronous and asynchronous API calls.
+The client implements intelligent retries (exponential backoff) and session self-healing
+for transient errors.
+"""
 import time
 import logging
-import requests
 import datetime
 import traceback
 import threading
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List, Union
-
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-
-CLIENT_PRIORITY_MOST_PRECIOUS = 100     # Precious API resource has the lowest using priority.
+CLIENT_PRIORITY_MOST_PRECIOUS = 100  # Precious API resource has the lowest using priority.
 CLIENT_PRIORITY_EXPENSIVE = 80
 CLIENT_PRIORITY_NORMAL = 50
 CLIENT_PRIORITY_CONSUMABLES = 20
-CLIENT_PRIORITY_FREEBIE = 0             # Prioritize using the regularly reset free quota
+CLIENT_PRIORITY_FREEBIE = 0  # Prioritize using the regularly reset free quota
 
 CLIENT_PRIORITY_HIGHER = -5
 CLIENT_PRIORITY_LOWER = 5
@@ -44,6 +49,7 @@ class BaseAIClient(ABC):
     Capabilities:
     - Abstract interface for API calls.
     - Status management (Available/Busy/Error).
+    - Unified error handling leveraging the structured APIResult from the underlying client.
 
     Usage Tracking & Quotas:
     - This base class does NOT track token usage or limits.
@@ -96,6 +102,15 @@ class BaseAIClient(ABC):
              model: Optional[str] = None,
              temperature: float = 0.7,
              max_tokens: int = 4096) -> Dict[str, Any]:
+        """
+        Executes a chat completion request.
+
+        This method is the primary entry point for consumers and handles:
+        1. Client status check (busy/unavailable).
+        2. Locking/unlocking the client.
+        3. Calling the subclass's API execution method (`_chat_completion_sync`).
+        4. Translating the unified `APIResult` into a final status/response.
+        """
 
         with self._lock:
             if self._status['status'] == ClientStatus.UNAVAILABLE:
@@ -106,25 +121,28 @@ class BaseAIClient(ABC):
             self._status['chat_count'] += 1
 
         try:
-            response = self._chat_completion_sync(messages, model, temperature, max_tokens)
+            # Subclass implements this, returning the structured APIResult from API_CORE
+            result: APIResult = self._chat_completion_sync(messages, model, temperature, max_tokens)
 
-            # 处理HTTP错误响应
-            if hasattr(response, 'status_code') and response.status_code != 200:
-                return self._handle_http_error(response)
+            # --- New Logic: Handle based on APIResult structure ---
 
-            # 处理API响应错误
-            if isinstance(response, dict) and 'error' in response:
-                return self._handle_api_error(response)
+            # 1. Successful response (API_CORE handled all retries/connections)
+            if result.get('success', False):
+                # result['data'] is the LLM response JSON
+                return self._handle_llm_response(result['data'], messages)
 
-            # 处理成功的LLM响应，检查业务逻辑错误
-            if isinstance(response, dict) and 'choices' in response:
-                return self._handle_llm_response(response, messages)
+            # 2. Failed response (error reported by API_CORE)
+            error_data = result.get('error')
+            if error_data:
+                # Delegate to the unified error handler
+                return self._handle_unified_error(error_data)
 
-            # 未知响应格式
-            logger.error(f"Unknown response format: {type(response)}")
-            return {'error': 'unknown_response_format', 'message': 'Received unexpected response format'}
+            # 3. Unknown failure mode (should not happen if API_CORE is working)
+            logger.error(f"Unknown APIResult structure: {result}")
+            return self._handle_exception(ValueError("API client returned an ambiguous result."))
 
         except Exception as e:
+            # Catches errors happening outside of the API call (e.g., locking issue, subclass error)
             return self._handle_exception(e)
 
         finally:
@@ -137,62 +155,59 @@ class BaseAIClient(ABC):
 
     def validate_response(self, response: Dict[str, Any], expected_content: Optional[str] = None) -> Optional[str]:
         """
-        验证 Chat 响应的内容是否合法。
-        用于业务层检查，或者 _test_and_update_status 内部检查。
+        Validates the content of the Chat response for business logic checks or health checks.
 
         Usage:
             if error := client.validate_response(response, expected_content="JSON"):
                 client.complain_error(error)
                 print(f"Client {client.name} failed: {error}")
-                # 触发重试逻辑...
+                # Trigger retry logic...
             else:
                 print("Success:", response['choices'][0]['message']['content'])
 
         Args:
-            response: chat() 方法返回的字典
-            expected_content: (可选) 期望在响应中出现的字符串，用于简单的关键词验证
+            response: The dictionary returned by the chat() method (or the 'data' field of APIResult).
+            expected_content: (Optional) Expected string to appear in the response for simple keyword validation.
 
         Returns:
-            Optional[str]: 如果验证通过返回 None；如果不通过，返回错误原因字符串。
-                           返回值可以直接传给 complain_error()。
+            Optional[str]: Returns None if validation passes; otherwise, returns the error reason string.
+                           The returned value can be passed directly to complain_error().
         """
-        # 1. 检查底层是否已经报错 (由 chat 内部捕获的)
+        # 1. Check if the input is already an error response from chat()
         if 'error' in response:
-            # 注意：chat 内部已经计过一次 error_count 了
-            # 但如果用户显式调用 validate 并 complain，说明这对业务影响很大，再次计分也是允许的
+            # Note: error_count is handled by chat() / _handle_unified_error
             return f"API Internal Error: {response['message']}"
 
-        # 2. 检查基本结构 (choices)
+        # 2. Check basic structure (choices)
         choices = response.get('choices', [])
         if not choices:
             return "Invalid response structure: 'choices' is empty"
 
-        # 3. 检查内容是否为空
+        # 3. Check for empty content
         first_content = choices[0].get('message', {}).get('content', '')
         if not first_content:
             return "Response content is empty"
 
-        # 4. (可选) 检查业务关键词
+        # 4. (Optional) Check business keywords
         if expected_content and expected_content not in first_content:
             return f"Content validation failed: '{expected_content}' not found in response"
 
-        # 5. (可选) 可以在这里检查 finish_reason，如果业务非常严格的话
+        # 5. (Optional) Could check finish_reason here if necessary (e.g., if 'length' is an error)
         # finish_reason = choices[0].get('finish_reason')
         # if finish_reason == 'length':
         #     return "Response truncated (length limit)"
 
-        return None  # 一切正常
+        return None  # All good
 
     def complain_error(self, reason: str = "Unspecified external error"):
         """
-        外部主动报错接口。
-        用于当 API 调用成功(HTTP 200)，但返回内容不符合预期（如逻辑错误、格式错误）时，
-        由上层调用者手动标记此 Client 为不健康。
+        Interface for external parties to manually report an error.
+        Used when the API call succeeded (HTTP 200) but the returned content
+        did not meet expectations (e.g., logic error, format error).
         """
         logger.warning(f"Client {self.name} received external complaint: {reason}")
 
-        # 既然外部认为由于这个 Client 的原因导致任务失败，
-        # 我们就应当增加错误计数，并将其标记为 ERROR，使其暂停接客或降低权重。
+        # Increase error count and mark as ERROR/UNAVAILABLE based on severity (usually ERROR for external)
         self._increase_error_count()
         self._update_client_status(ClientStatus.ERROR)
 
@@ -298,35 +313,36 @@ class BaseAIClient(ABC):
         Refactored: Uses validate_response to standardize health checks.
         """
         try:
-            # 1. 发起测试对话
-            # chat() 内部处理网络层面的 Available/Error 状态切换
+            # 1. Initiate test chat
+            # chat() internally handles status switching based on APIResult
             result = self.chat(
                 messages=[{"role": "user", "content": self.test_prompt}],
                 max_tokens=100
             )
 
+            # chat() returns a final response dictionary
             if 'error' in result:
-                # Error count is handled by chat.
+                # Error count and status update are handled by chat's error logic.
                 return False
 
-            # 2. 验证响应逻辑
-            # 直接使用公共的验证函数
+            # 2. Validate response logic
             error_reason = self.validate_response(result, expected_content=self.expected_response)
 
             if error_reason:
-                # 3. 如果有错，进行投诉
-                # 这会增加 error_count 并将状态设为 ERROR
+                # 3. If validation fails, manually complain
+                # This increases error_count and sets status to ERROR
                 self.complain_error(f"Self-test failed: {error_reason}")
                 return False
 
-            # 4. 验证通过
-            # chat() 成功时会重置 count，但这里显式确认一下也好，或者完全依赖 chat 的重置
-            # 建议：如果 validate_response 没问题，说明这是一个高质量的 Available
+            # 4. Validation passed
+            # Status should already be AVAILABLE from _handle_llm_response,
+            # but we explicitly reset the counter for a clean slate.
             self._reset_error_count()
             self._update_client_status(ClientStatus.AVAILABLE)
             return True
 
         except Exception as e:
+            # Catches errors in the testing routine itself, not the API call
             self.complain_error(f"Exception during self-test: {e}")
             return False
         finally:
@@ -352,179 +368,116 @@ class BaseAIClient(ABC):
             if old_status != new_status:
                 logger.info(f"Client {self.name} status changed from {old_status} to {new_status}")
 
-    # ---------------------------------------- Error Handling ----------------------------------------
+    # ---------------------------------------- Error Handling (Unified) ----------------------------------------
 
-    def _handle_http_error(self, response) -> Dict[str, Any]:
-        """处理HTTP错误状态码"""
+    def _handle_unified_error(self, error: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handles the structured error result from the underlying API_CORE.
 
-        # --- 新增逻辑：尝试从 Body 中通过 API Error 逻辑判断是否 Fatal ---
-        try:
-            error_json = response.json()
-            # 如果能解析出 JSON，且里面有 error 字段，直接转交给 handle_api_error 处理
-            # 因为 handle_api_error 里的分类更精准 (比如区分了 Quota 和 RateLimit)
-            if isinstance(error_json, dict) and 'error' in error_json:
-                logger.info(f"Delegating HTTP {response.status_code} to API error handler")
-                return self._handle_api_error(error_json)
-        except Exception:
-            # 解析失败，说明不是标准的 JSON 错误响应，继续走下面的 HTTP 状态码判断
-            pass
+        The error dictionary must contain:
+        - "type": One of 'PERMANENT', 'TRANSIENT_SERVER', or 'TRANSIENT_NETWORK'.
+        - "code": Specific error code (e.g., HTTP_401, CONNECTION_TIMEOUT).
+        - "message": Detailed error message.
+        """
+        error_type = error.get('type')
+        error_code = error.get('code')
+        message = error.get('message', 'No detail message provided.')
 
-        # 根据状态码分类错误类型
-        if response.status_code in [400, 422]:
-            # 错误请求 - 通常是参数错误，可能是可恢复的
-            error_type = 'recoverable'
-            logger.warning(f"Bad request error (recoverable): {response.status_code}")
-
-        # Because of the API token rotation. We don't think these error are fatal.
-        elif response.status_code == 401:
-            # 认证失败 - 通常是不可恢复的致命错误
-            error_type = 'fatal'
-            logger.error("Authentication failed - invalid API token")
-
-        elif response.status_code == 403:
-            # 权限不足 - 可能是不可恢复的
-            error_type = 'fatal'
-            logger.error("Permission denied - check API permissions")
-
-        elif response.status_code == 429:
-            # 速率限制 - 可恢复错误，需要延迟重试
-            error_type = 'recoverable'
-            retry_after = response.headers.get('Retry-After', 60)
-            logger.warning(f"Rate limit exceeded, retry after {retry_after}s")
-            # 可以在这里实现延迟重试逻辑
-
-        elif response.status_code >= 500:
-            # 服务器错误 - 通常是临时的，可恢复
-            error_type = 'recoverable'
-            logger.warning(f"Server error {response.status_code}, may be temporary")
-
-        else:
-            # 其他HTTP错误
-            error_type = 'recoverable'
-            logger.warning(f"HTTP error {response.status_code}")
-
-        if error_type == 'recoverable':
-            self._update_client_status(ClientStatus.ERROR)
-        elif error_type == 'fatal':
-            self._update_client_status(ClientStatus.UNAVAILABLE)
-        self._increase_error_count()
-
-        logger.warning(f"Error reason: {response.text}")
-
-        return {
-            'error': 'http_error',
-            'error_type': error_type,
-            'status_code': response.status_code,
-            'message': f"HTTP error {response.status_code}: {getattr(response, 'reason', 'Unknown')}"
-        }
-
-    def _handle_api_error(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """处理API返回的业务错误"""
-        error_data = response.get('error', {})
-        error_message = error_data.get('message', 'API no more error message') \
-            if isinstance(error_data, dict) else str(error_data)
-        error_type = error_data.get('type', 'unknown') if isinstance(error_data, dict) else 'unknown'
-
-        # 根据错误类型分类
-        fatal_errors = {'invalid_request_error', 'insufficient_quota', 'billing_hard_limit_reached'}
-        recoverable_errors = {'rate_limit_exceeded', 'server_error', 'timeout'}
-
-        if error_type in fatal_errors:
+        # Map API_CORE's classification to BaseAIClient's state update strategy
+        if error_type == "PERMANENT":
+            # Permanent errors (e.g., Bad Request, Auth Failure, Resource Not Found)
             error_category = 'fatal'
-            logger.error(f"Fatal API error: {error_message} (type: {error_type})")
-        elif error_type in recoverable_errors:
-            error_category = 'recoverable'
-            logger.warning(f"Recoverable API error: {error_message}")
-        else:
-            error_category = 'recoverable'
-            logger.warning(f"Unknown API error type: {error_type}, message: {error_message}")
-
-        if error_category == 'recoverable':
-            self._update_client_status(ClientStatus.ERROR)
-        elif error_category == 'fatal':
             self._update_client_status(ClientStatus.UNAVAILABLE)
+            logger.error(f"Permanent API Error ({error_code}): {message}")
+
+        elif error_type in ["TRANSIENT_SERVER", "TRANSIENT_NETWORK"]:
+            # Transient errors (e.g., 429, 5xx, Network Timeout, Connection Errors)
+            error_category = 'recoverable'
+            self._update_client_status(ClientStatus.ERROR)
+            logger.warning(f"Transient API Error ({error_code}): {message}")
+
+        else:
+            # Unknown or ambiguous type
+            error_category = 'recoverable'
+            self._update_client_status(ClientStatus.ERROR)
+            logger.error(f"Unknown API Error Type ({error_type}): {message}")
+
         self._increase_error_count()
 
         return {
-            'error': 'api_error',
-            'error_type': error_category,
-            'api_error_type': error_type,
-            'message': error_message
+            'error': 'unified_api_error',
+            'error_type': error_category,  # fatal or recoverable
+            'api_error_code': error_code,
+            'api_error_type': error_type,  # PERMANENT/TRANSIENT_SERVER/TRANSIENT_NETWORK
+            'message': message
         }
 
     def _handle_exception(self, exception: Exception) -> Dict[str, Any]:
-        """处理异常情况"""
+        """
+        Handles unexpected exceptions occurring outside of the API call process
+        (e.g., internal logic error, state locking failure).
+
+        Note: Network/HTTP exceptions are now handled by API_CORE and mapped via _handle_unified_error.
+        """
         error_message = str(exception)
 
-        # 根据异常类型分类
-        if isinstance(exception, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
-            # 网络相关异常 - 通常是可恢复的
-            error_type = 'recoverable'
-            logger.warning(f"Network error (recoverable): {error_message}")
-
-        elif isinstance(exception, requests.exceptions.RequestException):
-            # 其他请求异常
-            error_type = 'recoverable'
-            logger.warning(f"Request exception: {error_message}")
-
-        elif isinstance(exception, (ValueError, TypeError)):
-            # 参数错误 - 可能是不可恢复的编程错误
+        # Classify the exception (mainly looking for internal logic errors now)
+        if isinstance(exception, (ValueError, TypeError)):
+            # Parameter error or structure mismatch - potential programming error
             error_type = 'fatal'
             logger.error(f"Parameter error (fatal): {error_message}")
+            self._update_client_status(ClientStatus.UNAVAILABLE)  # Assume fatal if internal structure fails
 
         else:
-            # 其他未知异常
+            # Other unknown exceptions
             error_type = 'recoverable'
-            logger.error(f"Unexpected error: {error_message}")
-
-        if error_type == 'recoverable':
+            logger.error(f"Unexpected internal error: {error_message}")
             self._update_client_status(ClientStatus.ERROR)
-        elif error_type == 'fatal':
-            self._update_client_status(ClientStatus.UNAVAILABLE)
+
         self._increase_error_count()
 
         return {
-            'error': 'exception',
+            'error': 'internal_exception',
             'error_type': error_type,
             'exception_type': type(exception).__name__,
             'message': error_message
         }
 
     def _handle_llm_response(self, response: Dict[str, Any], original_messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """处理成功的LLM响应，检查业务逻辑错误并统计使用情况"""
+        """
+        Handles successful LLM response (status 200/success=True in APIResult),
+        checks for business logic errors, and records usage.
+        """
         try:
             choices = response.get('choices', [])
             if not choices:
-                # 这是一个真正的 API 错误（协议层）
+                # Protocol error: API claimed success but returned empty choices.
                 self._increase_error_count()
                 self._update_client_status(ClientStatus.ERROR)
                 return {
                     'error': 'empty_response',
                     'error_type': 'recoverable',
-                    'message': 'API returned empty choices array'
+                    'message': 'API returned empty choices array despite success status'
                 }
 
             first_choice = choices[0]
             finish_reason = first_choice.get('finish_reason')
 
-            # 'length' (达到max_tokens) 和 'content_filter' (内容审查)
-            # 是 API 正常工作的表现，不应计入 Client 的 error_count。
+            # 'length' and 'content_filter' are normal operational outcomes, not client errors.
             if finish_reason == 'length':
                 logger.warning(f"Client {self.name}: Response truncated due to length.")
-                # 这是一个 Warning，不是 Error，不要调用 _increase_error_count
-
             elif finish_reason == 'content_filter':
                 logger.warning(f"Client {self.name}: Response triggered content filter.")
 
             try:
-                # 统计token使用量
+                # Record token usage
                 if usage_data := response.get('usage', {}):
                     usage_data['request_count'] = 1
                     self.record_usage(usage_data)
             except Exception:
-                pass
+                pass  # Ignore usage recording failures
 
-            # 只要能正常解析出 choices，就认为 Client 是健康的
+            # If the response was successfully processed, the client is healthy
             self._reset_error_count()
             self._update_client_status(ClientStatus.AVAILABLE)
 
@@ -532,7 +485,7 @@ class BaseAIClient(ABC):
 
         except Exception as e:
             logger.error(f"Error processing LLM response: {e}")
-            # 解析过程崩了，可能是数据结构变了，算作错误
+            # Failure in the processing logic itself
             self._increase_error_count()
             self._update_client_status(ClientStatus.ERROR)
             return {
@@ -560,7 +513,10 @@ class BaseAIClient(ABC):
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
                               temperature: float = 0.7,
-                              max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
+                              max_tokens: int = 4096) -> APIResult:  # <-- Changed return type to APIResult
+        """
+        Subclass must implement this, calling the API_CORE and returning its structured result.
+        """
         pass
 
 
