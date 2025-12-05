@@ -157,6 +157,8 @@ class BaseAIClient(ABC):
         finally:
             with self._lock:
                 self._status['in_use'] = False
+                # 重要：无论成功或失败，只要尝试了 chat，都应该更新 last_chat
+                self._status['last_chat'] = time.time()
 
     def get_status(self, key: Optional[str] = None) -> Any:
         with self._lock:
@@ -1043,40 +1045,49 @@ class AIClientManager:
 
     def _check_client_health(self):
         """
-        Trigger active health checks (connectivity/latency) for eligible clients.
-        This does NOT recalculate quota/balance logic (handled by Mixin internally).
+        Trigger active health checks for eligible clients using dynamic intervals,
+        based on the last successful/unsuccessful chat activity.
         """
         clients_to_check = []
+        now = time.time()
 
         with self._lock:
             for client in self.clients:
                 client_status = client.get_status('status')
-                status_last_updated = client.get_status('status_last_updated')
 
-                if (client_error_count := client.get_status('error_count')) > 0:
-                    adjusted_error_interval = min(self.check_error_interval * client_error_count,
-                                                  self.reset_fatal_interval)
-                else:
-                    adjusted_error_interval = self.check_error_interval
+                # --- 关键修改 1: 使用最近的活动时间 ---
+                # last_chat: 上一次用户请求时间 (无论成功失败，都已更新状态)
+                # last_test: 上一次系统主动测试时间
+                t_last_activity = max(client.get_status('last_chat'), client.get_status('last_test'))
+                # ------------------------------------
 
-                # Determine timeout based on current status
-                timeout = {
-                    ClientStatus.UNKNOWN.value: 0,
-                    ClientStatus.AVAILABLE.value: self.check_stable_interval,
-                    # Just treat error and fatal as the same.
-                    ClientStatus.ERROR.value: adjusted_error_interval,
-                    ClientStatus.UNAVAILABLE.value: adjusted_error_interval,
-                }.get(client_status.value, adjusted_error_interval)
+                # 1. 动态计算检查间隔 (Timeout)
+                client_error_count = client.get_status('error_count')
+                base_timeout = self.check_error_interval
 
-                # print(f"client_status 的类 ID: {id(client_status.__class__)}")
-                # print(f"ClientStatus 类的 ID: {id(ClientStatus)}")
-                # print(f"是否同一个类: {client_status.__class__ is ClientStatus}")
-                #
-                # print(f"client_status 所属的模块: {client_status.__class__.__module__}")
-                # print(f"ClientStatus 所属的模块: {ClientStatus.__module__}")
+                if client_status == ClientStatus.AVAILABLE:
+                    # 稳定 Client：使用长间隔
+                    timeout = self.check_stable_interval
+                elif client_status == ClientStatus.UNAVAILABLE:
+                    # 永久不可用：超长间隔 (e.g., 30x)
+                    timeout = self.reset_fatal_interval
+                elif client_status == ClientStatus.UNKNOWN:
+                    # 首次检查：立即检查
+                    timeout = 0
+                else:  # ClientStatus.ERROR
+                    # 瞬时错误：使用指数退避，避免连续失败时过度检查
+                    exponent = min(client_error_count, 4)
+                    timeout = base_timeout * (2 ** exponent)
 
-                if time.time() - status_last_updated > timeout:
-                    clients_to_check.append(client)
+                # 2. 检查是否达到 timeout
+                # 如果 t_last_activity 是 0.0 (UNKNOWN 状态)，则现在 - 0 > 0 (timeout) 也会触发
+                if now - t_last_activity > timeout:
+
+                    # 3. 避免检查正在被用户使用的 Client
+                    if not client._is_acquired():
+                        clients_to_check.append(client)
+                    else:
+                        logger.debug(f"Skipping health check for {client.name} (Acquired by user).")
 
         # Perform checks outside the main lock to avoid blocking get_available_client
         for client in clients_to_check:
