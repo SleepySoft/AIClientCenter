@@ -9,5 +9,5 @@ fastapi
 uvicorn
 jinja2
 
-zai-sdk
+zhipuai
 # google-generativeai

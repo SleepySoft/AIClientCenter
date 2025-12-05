@@ -13,17 +13,17 @@ self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
 try:
-    from .AIClientConfigExample import AI_CLIENTS
-    from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
-    from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
-    from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
-    from .AIServiceTokenRotator import SiliconFlowServiceRotator
-except ImportError:
     from AIClientConfigExample import AI_CLIENTS
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from AIServiceTokenRotator import SiliconFlowServiceRotator
+except ImportError:
+    from .AIClientConfigExample import AI_CLIENTS
+    from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
+    from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
+    from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
+    from .AIServiceTokenRotator import SiliconFlowServiceRotator
 
 
 # 1. 定义彩色格式
@@ -145,6 +145,7 @@ def worker_task(client, request_id, manager, content: str = 'random'):
     """
     后台工作线程：执行对话任务，记录耗时，并最终释放客户端。
     """
+    start_time = time.time()
     try:
         if content == 'random':
             prompt = get_random_test_prompt()
@@ -156,7 +157,6 @@ def worker_task(client, request_id, manager, content: str = 'random'):
 
         print(f"\n[Request #{request_id}] 🚀 Assigned to {client.name}")
 
-        start_time = time.time()
         response = client.chat(messages=messages)
 
         # 这里假设 response 结构，根据实际情况调整
@@ -191,13 +191,12 @@ def setup_client_manager():
     clients = AI_CLIENTS
 
     # Register all clients.
-    # [client_manager.register_client(client) for client in clients]
+    [client_manager.register_client(client) for client in clients.values()]
 
     # Or register specified client.
-    specified_client = clients['gemini']
-    client_manager.register_client(specified_client)
-
-    print(specified_client.get_model_list())
+    # specified_client = clients['gemini']
+    # client_manager.register_client(specified_client)
+    # print(specified_client.get_model_list())
 
     return client_manager
 
