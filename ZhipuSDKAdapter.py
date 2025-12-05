@@ -151,7 +151,8 @@ class ZhipuSDKAdapter:
             messages: List[Dict[str, str]],
             model: Optional[str] = None,
             temperature: float = 0.95,
-            max_tokens: int = 4096
+            max_tokens: int = 4096,
+            is_health_check: bool = False
     ) -> APIResult:
         """
         The Core Adapter Method.
