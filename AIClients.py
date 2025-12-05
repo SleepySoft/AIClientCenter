@@ -88,7 +88,8 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
                               temperature: float = 0.7,
-                              max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
+                              max_tokens: int = 4096,
+                              is_health_check: bool = False) -> Union[Dict[str, Any], requests.Response]:
         """
         Executes the synchronous chat completion.
 
@@ -101,7 +102,8 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             messages=messages,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            is_health_check=is_health_check
         )
 
 
@@ -151,7 +153,8 @@ class SelfRotatingOpenAIClient(StandardOpenAIClient):
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
                               temperature: float = 0.7,
-                              max_tokens: int = 4096) -> Union[Dict[str, Any], requests.Response]:
+                              max_tokens: int = 4096,
+                              is_health_check: bool = False) -> Union[Dict[str, Any], requests.Response]:
 
         # 1. Token Strategy (Delegated to subclass)
         self._prepare_token()
@@ -165,7 +168,8 @@ class SelfRotatingOpenAIClient(StandardOpenAIClient):
             messages=messages,
             model=target_model,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            is_health_check=is_health_check
         )
 
 

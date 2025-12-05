@@ -109,7 +109,8 @@ class BaseAIClient(ABC):
              messages: List[Dict[str, str]],
              model: Optional[str] = None,
              temperature: float = 0.7,
-             max_tokens: int = 4096) -> Dict[str, Any]:
+             max_tokens: int = 4096,
+             is_health_check: bool = False) -> Dict[str, Any]:
         """
         Executes a chat completion request.
 
@@ -130,7 +131,7 @@ class BaseAIClient(ABC):
 
         try:
             # Subclass implements this, returning the structured APIResult from API_CORE
-            result: APIResult = self._chat_completion_sync(messages, model, temperature, max_tokens)
+            result: APIResult = self._chat_completion_sync(messages, model, temperature, max_tokens, is_health_check)
 
             # --- New Logic: Handle based on APIResult structure ---
 
@@ -534,7 +535,8 @@ class BaseAIClient(ABC):
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
                               temperature: float = 0.7,
-                              max_tokens: int = 4096) -> APIResult:  # <-- Changed return type to APIResult
+                              max_tokens: int = 4096,
+                              is_health_check: bool = False) -> APIResult:  # <-- Changed return type to APIResult
         """
         Subclass must implement this, calling the API_CORE and returning its structured result.
         """

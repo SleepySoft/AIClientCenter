@@ -12,6 +12,12 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import (RequestException, Timeout, ConnectionError,
                                  ConnectTimeout, ReadTimeout, ProxyError, SSLError)
 
+try:
+    from APIResult import APIResult
+except ImportError:
+    from .APIResult import APIResult
+
+
 # --- Optional Dependencies ---
 try:
     import aiohttp
@@ -50,9 +56,6 @@ RETRYABLE_ASYNC_EXCEPTIONS = tuple(_async_retry_exceptions)
 
 LLM_DEFAULT_TIMEOUT_S = 5 * 60
 
-
-# --- Standardized Result Structure Type Hint ---
-APIResult = Dict[str, Union[bool, Optional[Dict[str, Any]]]]
 
 # --- Helper Function for Structured Error ---
 def _make_error_result(error_type: str, error_code: str, message: str) -> APIResult:
@@ -242,41 +245,59 @@ class OpenAICompatibleAPI:
             # 启动一个守护线程去关闭旧连接，不通过主线程等待
             threading.Thread(target=safe_close, args=(old_session,), daemon=True).start()
 
-    # 应用到装饰器
-    @backoff.on_exception(
-        backoff.expo,
-        (RequestException,),
-        max_tries=3,
-        base=2,
-        max_time=30,  # 这里的 max_time 限制的是重试间隔的总等待时间，限制不了 requests 内部的 timeout
-        giveup=_should_giveup,
-        on_backoff=log_retry_attempt
-    )
-    def _attempt_sync_post(self, url: str, data: dict) -> requests.Response:
+    def _attempt_sync_post_core(self, url: str, data: dict, timeout_tuple: tuple) -> requests.Response:
+        """
+        [NEW INTERNAL] The non-retried, core logic for POST request.
+        """
         req_id = str(uuid.uuid4())[:8]
 
         try:
             logger.debug(f"[{req_id}] POST requesting {url}...")
 
-            # timeout=(connect, read)
-            # 5s connect: fast fail for network issues
-            # LLM_DEFAULT_TIMEOUT_S read: wait for AI generation
             resp = self.sync_session.post(
                 url,
                 json=data,
-                timeout=(5, LLM_DEFAULT_TIMEOUT_S)
+                timeout=timeout_tuple  # 使用传入的 timeout
             )
 
             logger.debug(f"[{req_id}] POST success: {resp.status_code}")
             return resp
 
         except RequestException as e:
-            # Log the specific error before backoff decides to retry or raise
-            # Note: This runs BEFORE the 'log_retry_attempt' handler
             logger.error(f"[{req_id}] POST failed/hung: {type(e).__name__} - {e}")
             raise e
 
-    def _post_sync_unified(self, endpoint: str, data: dict) -> APIResult:
+    def _attempt_sync_post(self, url: str, data: dict, is_health_check: bool) -> requests.Response:
+        """
+        Public entry point for sync POST, applying backoff only if not a health check.
+        """
+        if is_health_check:
+            # 健康检查模式：使用短超时 (e.g., 10s total) 且不重试
+            # (ConnectTimeout, ReadTimeout)
+            short_timeout = (5, 5)  # 5s 连接 + 5s 读取，总共 10s 快速失败
+            return self._attempt_sync_post_core(url, data, short_timeout)
+        else:
+            # 正常模式：应用 Backoff 和长超时
+
+            # 正常模式的超时配置 (保持原有逻辑)
+            normal_timeout = (5, LLM_DEFAULT_TIMEOUT_S)
+
+            # 使用 backoff 装饰器封装 core 逻辑
+            @backoff.on_exception(
+                backoff.expo,
+                (RequestException,),
+                max_tries=3,
+                base=2,
+                max_time=30,
+                giveup=_should_giveup,
+                on_backoff=log_retry_attempt
+            )
+            def _retry_wrapper():
+                return self._attempt_sync_post_core(url, data, normal_timeout)
+
+            return _retry_wrapper()
+
+    def _post_sync_unified(self, endpoint: str, data: dict, is_health_check: bool = False) -> APIResult:
         """
         Internal wrapper for synchronous POST requests, returns a structured APIResult.
         Handles: backoff retries, session reset, and error categorization.
@@ -285,7 +306,7 @@ class OpenAICompatibleAPI:
 
         try:
             # 1. 执行请求 (Backoff 负责连接层重试，如超时/断网)
-            response = self._attempt_sync_post(url, data)
+            response = self._attempt_sync_post(url, data, is_health_check)
             status = response.status_code
 
             # 2. 成功
@@ -472,24 +493,26 @@ class OpenAICompatibleAPI:
             return {'error': str(e)}
 
     def create_chat_completion_sync(self, messages: List[Dict], model: str = None,
-                                    temperature: float = 0.7, max_tokens: int = 4096) -> APIResult:
+                                    temperature: float = 0.7, max_tokens: int = 4096,
+                                    is_health_check: bool = False) -> APIResult:
         """Creates a chat completion (Synchronous), returning a structured result."""
         if not self._api_token:
             return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")
 
         data = self._prepare_request_data(model=model, messages=messages,
                                           temperature=temperature, max_tokens=max_tokens)
-        return self._post_sync_unified("chat/completions", data)
+        return self._post_sync_unified("chat/completions", data, is_health_check=is_health_check)
 
     def create_completion_sync(self, prompt: str, model: str = None,
-                               temperature: float = 0.7, max_tokens: int = 4096) -> APIResult:
+                               temperature: float = 0.7, max_tokens: int = 4096,
+                               is_health_check: bool = False) -> APIResult:
         """Creates a text completion (Synchronous), returning a structured result."""
         if not self._api_token:
             return _make_error_result("PERMANENT", "MISSING_TOKEN", "API token is missing.")
 
         data = self._prepare_request_data(model=model, prompt=prompt,
                                           temperature=temperature, max_tokens=max_tokens)
-        return self._post_sync_unified("completions", data)
+        return self._post_sync_unified("completions", data, is_health_check=is_health_check)
 
     async def create_chat_completion_async(self, messages: List[Dict], model: str = None,
                                            temperature: float = 0.7,
