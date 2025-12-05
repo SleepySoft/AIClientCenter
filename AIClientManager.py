@@ -6,6 +6,7 @@ and the error classification system used across all synchronous and asynchronous
 The client implements intelligent retries (exponential backoff) and session self-healing
 for transient errors.
 """
+import socket
 import time
 import logging
 import datetime
@@ -30,6 +31,11 @@ CLIENT_PRIORITY_LOWER = 5
 
 CLIENT_PRIORITY_MORE_PRECIOUS = CLIENT_PRIORITY_LOWER
 CLIENT_PRIORITY_LESS_PRECIOUS = CLIENT_PRIORITY_HIGHER
+
+
+# 设置全局默认 Socket 超时
+# 防止 DNS 解析或 SSL 握手无限期卡死（requests 的 timeout 有时管不到这里）
+socket.setdefaulttimeout(600)
 
 
 class ClientStatus(Enum):

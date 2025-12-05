@@ -1,5 +1,5 @@
 import os
-import json
+import uuid
 import socket
 import backoff
 import logging
@@ -21,6 +21,7 @@ except ImportError:
     TCPConnector = None
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 # --- Constants & Helpers ---
@@ -168,8 +169,7 @@ class OpenAICompatibleAPI:
     # --------------------------------------------------------------------------
 
     def get_api_token(self) -> str:
-        with self.lock:
-            return self._api_token
+        return self._api_token
 
     def set_api_token(self, token: str):
         """
@@ -183,7 +183,8 @@ class OpenAICompatibleAPI:
             if self.sync_session:
                 self.sync_session.headers["Authorization"] = f"Bearer {self._api_token}"
 
-            logger.info(f'API key updated. (Ends with: ...{token[-4:] if token else "None"})')
+            logger.info(f'API key updated. Changed from {token[-8:] if token else "None"} '
+                        f'to {old_token[-8:] if old_token else "None"}')
 
     def _get_dynamic_header(self) -> dict:
         """Returns fresh headers (useful for async requests where session is shared)."""
@@ -215,14 +216,31 @@ class OpenAICompatibleAPI:
         return session
 
     def _reset_sync_session(self):
-        """Forcefully closes and recreates the synchronous session."""
-        with self.lock:
+        """
+        Forcefully recreates the session.
+        No lock is used to avoid deadlocks during network freezes.
+        """
+        logger.warning("Resetting synchronous session...")
+
+        # 1. 先创建新会话（避免中间出现 None 状态）
+        new_session = self._create_sync_session()
+
+        # 2. 交换引用
+        old_session = self.sync_session
+        self.sync_session = new_session
+
+        # 3. 【关键修改】不要在主线程里同步等待 close()，防止卡死
+        # 如果 old_session 的 socket 已经坏死，close() 可能会阻塞很久。
+        # 我们直接把清理工作扔给线程去做，或者干脆只把它设为 None 让 GC 处理
+        def safe_close(s):
             try:
-                logger.warning("Reseting synchronous session to recover from connection error...")
-                self.sync_session.close()
+                s.close()
             except Exception:
                 pass
-            self.sync_session = self._create_sync_session()
+
+        if old_session:
+            # 启动一个守护线程去关闭旧连接，不通过主线程等待
+            threading.Thread(target=safe_close, args=(old_session,), daemon=True).start()
 
     # 应用到装饰器
     @backoff.on_exception(
@@ -235,7 +253,11 @@ class OpenAICompatibleAPI:
         on_backoff=log_retry_attempt
     )
     def _attempt_sync_post(self, url: str, data: dict) -> requests.Response:
+        req_id = str(uuid.uuid4())[:8]
+
         try:
+            logger.debug(f"[{req_id}] POST requesting {url}...")
+
             # timeout=(connect, read)
             # 5s connect: fast fail for network issues
             # LLM_DEFAULT_TIMEOUT_S read: wait for AI generation
@@ -244,14 +266,14 @@ class OpenAICompatibleAPI:
                 json=data,
                 timeout=(5, LLM_DEFAULT_TIMEOUT_S)
             )
-            # Log success (optional, keeping it short)
-            # logger.info(f"Req Success: {resp.status_code}")
+
+            logger.debug(f"[{req_id}] POST success: {resp.status_code}")
             return resp
 
         except RequestException as e:
             # Log the specific error before backoff decides to retry or raise
             # Note: This runs BEFORE the 'log_retry_attempt' handler
-            logger.debug(f"Req Failed: {type(e).__name__} - {str(e)}")
+            logger.error(f"[{req_id}] POST failed/hung: {type(e).__name__} - {e}")
             raise e
 
     def _post_sync_unified(self, endpoint: str, data: dict) -> APIResult:
