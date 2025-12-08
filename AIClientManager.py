@@ -533,6 +533,10 @@ class BaseAIClient(ABC):
         pass
 
     @abstractmethod
+    def get_api_base_url(self) -> str:
+        pass
+
+    @abstractmethod
     def _chat_completion_sync(self,
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,
@@ -599,7 +603,7 @@ class AIClientManager:
     def get_available_client(self, user_name: str,
                              request_change: bool = False,
                              target_group_id: str = None,
-                             target_client_name: str = None) -> Optional[Any]:
+                             target_client_name: str = None) -> Optional[BaseAIClient]:
         """
         Get an available client for a specific user with enhanced filtering options.
 

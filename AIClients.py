@@ -84,6 +84,10 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
         return self.api.get_using_model()
 
     @override
+    def get_api_base_url(self) -> str:
+        return self.api.get_api_base_url()
+
+    @override
     def _chat_completion_sync(self,
                               messages: List[Dict[str, str]],
                               model: Optional[str] = None,

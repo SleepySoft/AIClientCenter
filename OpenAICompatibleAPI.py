@@ -152,7 +152,7 @@ class OpenAICompatibleAPI:
             default_model: The model name to use if not specified in requests.
             proxies: Dictionary for HTTP/HTTPS proxies.
         """
-        self.api_base_url = api_base_url.strip()
+        self._api_base_url = api_base_url.strip()
         self._api_token = token or os.getenv("OPENAI_API_KEY")
         self.default_model = default_model
         self.using_model = default_model
@@ -188,6 +188,9 @@ class OpenAICompatibleAPI:
 
             logger.info(f'API key updated. Changed from {token[-8:] if token else "None"} '
                         f'to {old_token[-8:] if old_token else "None"}')
+
+    def get_api_base_url(self) -> str:
+        return self._api_base_url
 
     def _get_dynamic_header(self) -> dict:
         """Returns fresh headers (useful for async requests where session is shared)."""
@@ -546,7 +549,7 @@ class OpenAICompatibleAPI:
 
     def _construct_url(self, endpoint: str) -> str:
         """Joins the base URL with the endpoint."""
-        base = self.api_base_url.rstrip('/')
+        base = self._api_base_url.rstrip('/')
         return f"{base}/{endpoint}"
 
     def _get_url_proxy(self, url: str) -> Optional[str]:

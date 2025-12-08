@@ -146,6 +146,9 @@ class ZhipuSDKAdapter:
             ]
         }
 
+    def get_api_base_url(self) -> str:
+        return 'lib:zhipuai'
+
     def create_chat_completion_sync(
             self,
             messages: List[Dict[str, str]],
