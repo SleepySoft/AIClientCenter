@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 import random
 import logging
@@ -7,19 +8,23 @@ import traceback
 from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor
 
-from AIClientCenter.ComplexConversation import MESSAGE
-
 self_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(self_path)
 
 try:
+    from ComplexConversation import MESSAGE
     from AIClientConfigExample import AI_CLIENTS
+    from AIClientManagerBackend import AIDashboardService
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
     from AIServiceTokenRotator import SiliconFlowServiceRotator
-except ImportError:
+except ImportError as e:
+    print(str(e))
+
+    from .ComplexConversation import MESSAGE
     from .AIClientConfigExample import AI_CLIENTS
+    from .AIClientManagerBackend import AIDashboardService
     from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
@@ -263,6 +268,12 @@ def main():
 
     client_manager = setup_client_manager()
     client_manager.start_monitoring()
+
+    # Set silicon flow clients parallel limitation.
+    client_manager.set_group_limit('silicon flow', 1)
+
+    client_backend = AIDashboardService(client_manager)
+    threading.Thread(target=client_backend.run_standalone).start()
 
     run_ai_test(client_manager)
 

@@ -30,6 +30,12 @@ An AI client center that supports token and model rotation
 4. 自动管理Client的错误状态，尽可能及时发现出错的客户端，仅返回可用的客户端
 5. 自动测试Client的可用性，及时发现已恢复的服务。
 
+## 快速运行及预览
+
+安装 [requirements.txt](requirements.txt) 后，
+运行 [AIClientUsage.py](AIClientUsage.py) ，
+并访问 [http://127.0.0.1:8000/](http://127.0.0.1:8000/) 查看管理页面。
+
 ## 说明
 
 [AIClientUsage.py](AIClientUsage.py)
@@ -39,6 +45,10 @@ An AI client center that supports token and model rotation
 [AIClientManager.py](AIClientManager.py)
 
 > 核心代码：BaseAIClient 接口的定义及 Client 的管理。
+
+[AIClientManagerBackend.py](AIClientManagerBackend.py)
+
+> 网页管理工具后端，内联前端网页。该功能可选，完全可以不使用该模块，但建议使用。
 
 [AIClients.py](AIClients.py)
 
@@ -50,7 +60,11 @@ An AI client center that supports token and model rotation
 
 [AIServiceTokenRotator.py](AIServiceTokenRotator.py)
 
-> 小额批量Token管理及轮转。
+> 批量Token管理及自动轮转功能。
+
+[SimpleRotator.py](SimpleRotator.py)
+
+> 机械的轮换功能，仅通过计数进行轮换。用于像魔搭这种限制单个模型使用量的平台。
 
 [AiServiceBalanceQuery.py](AiServiceBalanceQuery.py)
 
@@ -60,21 +74,18 @@ An AI client center that supports token and model rotation
 
 > OpenAI风格的API接口，通常并不会直接使用，而是将其传入 BaseAIClient 并加入 AIClientManager 统一管理。
 
+[ZhipuSDKAdapter.py](ZhipuSDKAdapter.py)
 
----------
+> 智谱的客户端，使用官方API。智谱注册和实名认证后有一定免费额度。
 
-[AIClientTest.py](AIClientTest.py) | 
-[ArtificialPuppetBackend.py](ArtificialPuppetBackend.py) | 
-[ArtificialPuppetFrontend.html](ArtificialPuppetFrontend.html) | 
-[GeminiAIClient.py](GeminiAIClient.py) | 
-[Mocks.py](Mocks.py)
+[GoogleGeminiAdapter.py](GoogleGeminiAdapter.py)
 
-> 其它文件，未完全实现，暂时不要管。
+> Gemini客户端。由于本人账号限制，无法白嫖。
+
 
 ---------
 
 ## 其它
 
-边用边改进。
-
+各个平台的免费额度政策经常变，因此很可能出现不稳定或一段时间拒绝服务的情况。并且在使用时注意限制同一个平台的并发访问数量（AIClientManager.set_group_limit()）。
 

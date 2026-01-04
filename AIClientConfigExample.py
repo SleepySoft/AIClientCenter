@@ -5,7 +5,6 @@
 import os
 from typing import List, Dict
 
-from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 from GlobalConfig import *
 from AIClientCenter.ZhipuSDKAdapter import ZhipuSDKAdapter
 from AIClientCenter.AIClients import StandardOpenAIClient, \
@@ -14,6 +13,7 @@ from AIClientCenter.AIClientManager import CLIENT_PRIORITY_EXPENSIVE, \
     CLIENT_PRIORITY_FREEBIE, BaseAIClient, CLIENT_PRIORITY_NORMAL, CLIENT_PRIORITY_CONSUMABLES
 from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
 from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
+from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 
 
 def build_ai_clients() -> Dict[str, BaseAIClient]:
