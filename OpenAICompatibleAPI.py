@@ -581,7 +581,7 @@ def create_siliconflow_client(token: Optional[str] = None, model: Optional[str] 
     client = OpenAICompatibleAPI(
         api_base_url='https://api.siliconflow.cn/v1',
         token=token or os.getenv("SILICON_API_KEY"),
-        default_model=model or 'Qwen/Qwen3-235B-A22B'
+        default_model=model or 'deepseek-ai/DeepSeek-V3'
     )
     return client
 
