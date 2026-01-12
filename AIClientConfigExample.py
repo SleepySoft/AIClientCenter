@@ -160,3 +160,10 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
 
 AI_CLIENTS = build_ai_clients()
+
+AI_CLIENT_LIMIT = {
+    'zhipu': 1,
+    'model scope': 1,
+    'silicon flow': 2,
+    'silicon flow proxy': 1,
+}
