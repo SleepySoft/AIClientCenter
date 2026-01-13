@@ -13,8 +13,8 @@ sys.path.append(self_path)
 
 try:
     from ComplexConversation import MESSAGE
-    from AIClientConfigExample import AI_CLIENTS
     from AIClientManagerBackend import AIDashboardService
+    from AIClientConfigExample import AI_CLIENTS, AI_CLIENT_LIMIT
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
@@ -23,8 +23,8 @@ except ImportError as e:
     print(str(e))
 
     from .ComplexConversation import MESSAGE
-    from .AIClientConfigExample import AI_CLIENTS
     from .AIClientManagerBackend import AIDashboardService
+    from .AIClientConfigExample import AI_CLIENTS, AI_CLIENT_LIMIT
     from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
@@ -203,6 +203,9 @@ def setup_client_manager():
     # client_manager.register_client(specified_client)
     # print(specified_client.get_model_list())
 
+    # Set client group limit. Depends on AI service vendor's limitation.
+    [client_manager.set_group_limit(group, limit) for group, limit in AI_CLIENT_LIMIT.items()]
+
     return client_manager
 
 
@@ -268,9 +271,6 @@ def main():
 
     client_manager = setup_client_manager()
     client_manager.start_monitoring()
-
-    # Set silicon flow clients parallel limitation.
-    client_manager.set_group_limit('silicon flow', 1)
 
     client_backend = AIDashboardService(client_manager)
     threading.Thread(target=client_backend.run_standalone).start()
