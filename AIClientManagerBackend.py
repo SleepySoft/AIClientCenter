@@ -1,9 +1,11 @@
-import threading
-import logging
+import time
 import json
+import logging
+import threading
 from enum import Enum
 from typing import Optional, Callable, Any
 from flask import Flask, Blueprint, jsonify, request, Response, abort
+
 from werkzeug.exceptions import HTTPException
 
 
@@ -51,6 +53,9 @@ FRONTEND_HTML = r"""
         <div class="flex space-x-4">
              <button @click="fetchData" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
                 <i class="fa-solid fa-rotate-right" :class="{'fa-spin': loading}"></i> Refresh
+                <a href="timeline" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
+                  <i class="fa-solid fa-chart-gantt mr-1"></i> Timeline
+                </a>
             </button>
         </div>
     </div>
@@ -367,6 +372,178 @@ FRONTEND_HTML = r"""
 """
 
 
+FRONTEND_TIMELINE_HTML = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI Client Timeline</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <style>[v-cloak]{display:none;}</style>
+</head>
+
+<body class="bg-gray-100 text-gray-800 font-sans">
+<div id="app" v-cloak class="min-h-screen p-6">
+  <div class="max-w-7xl mx-auto mb-4 flex justify-between items-center">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">
+        <i class="fa-solid fa-chart-gantt mr-2 text-indigo-600"></i> Client Timeline
+      </h1>
+      <p class="text-xs text-gray-500 mt-1">Run: {{ runId || '-' }} | Updated: {{ lastUpdated }}</p>
+    </div>
+    <div class="flex space-x-2">
+      <a href="./" class="px-3 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
+        <i class="fa-solid fa-arrow-left mr-1"></i> Back
+      </a>
+      <button @click="fetchTimeline" class="px-3 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
+        <i class="fa-solid fa-rotate-right" :class="{'fa-spin': loading}"></i> Refresh
+      </button>
+    </div>
+  </div>
+
+  <div class="max-w-7xl mx-auto bg-white shadow rounded-lg p-4 mb-4">
+    <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+      <div>
+        <label class="text-xs text-gray-500">Run</label>
+        <select v-model="runId" class="w-full border rounded px-2 py-1 text-sm" @change="fetchTimeline">
+          <option v-for="r in runs" :value="r.run_id">{{ r.run_id }}</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Client (optional)</label>
+        <input v-model="clientFilter" class="w-full border rounded px-2 py-1 text-sm" placeholder="client name"/>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Window</label>
+        <select v-model="preset" class="w-full border rounded px-2 py-1 text-sm" @change="applyPreset">
+          <option value="900">Last 15m</option>
+          <option value="3600">Last 1h</option>
+          <option value="21600">Last 6h</option>
+          <option value="86400">Last 24h</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">From (epoch sec)</label>
+        <input v-model.number="fromTs" type="number" class="w-full border rounded px-2 py-1 text-sm"/>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">To (epoch sec)</label>
+        <input v-model.number="toTs" type="number" class="w-full border rounded px-2 py-1 text-sm"/>
+      </div>
+    </div>
+  </div>
+
+  <div class="max-w-7xl mx-auto bg-white shadow rounded-lg p-4">
+    <div id="timelinePlot" style="height: 560px;"></div>
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+createApp({
+  data() {
+    const now = Math.floor(Date.now()/1000);
+    return {
+      runs: [],
+      runId: '',
+      clientFilter: '',
+      preset: 3600,
+      fromTs: now - 3600,
+      toTs: now,
+      items: [],
+      legend: {},
+      loading: false,
+      lastUpdated: '-'
+    };
+  },
+  async mounted() {
+    await this.fetchRuns();
+    this.applyPreset();
+    if (this.runId) await this.fetchTimeline();
+  },
+  methods: {
+    applyPreset() {
+      const now = Math.floor(Date.now()/1000);
+      this.toTs = now;
+      this.fromTs = now - parseInt(this.preset);
+    },
+    async fetchRuns() {
+      const res = await fetch('api/runs');
+      const data = await res.json();
+      this.runs = data.runs || [];
+      if (!this.runId && this.runs.length > 0) this.runId = this.runs[0].run_id;
+    },
+    async fetchTimeline() {
+      if (!this.runId) return;
+      this.loading = true;
+      try {
+        const qs = new URLSearchParams({
+          run_id: this.runId,
+          from: String(this.fromTs),
+          to: String(this.toTs),
+        });
+        if (this.clientFilter) qs.set('client', this.clientFilter);
+        const res = await fetch('api/timeline?' + qs.toString());
+        const data = await res.json();
+        this.items = data.items || [];
+        this.legend = data.legend || {};
+        this.lastUpdated = new Date().toLocaleTimeString();
+        this.renderPlot();
+      } finally {
+        this.loading = false;
+      }
+    },
+    renderPlot() {
+      const items = this.items;
+      const legend = this.legend;
+
+      const byState = {};
+      items.forEach(it => {
+        const st = it.state || 'UNKNOWN';
+        (byState[st] ||= []).push(it);
+      });
+
+      const traces = Object.keys(byState).map(st => {
+        const segs = byState[st];
+        return {
+          type: 'bar',
+          orientation: 'h',
+          name: st,
+          y: segs.map(s => s.client),
+          base: segs.map(s => new Date(s.start * 1000)),
+          x: segs.map(s => Math.max(0, (s.end - s.start) * 1000)),
+          hovertext: segs.map(s =>
+            `${s.client}<br>${st}<br>${s.model || ''}<br>` +
+            `Start: ${new Date(s.start*1000).toLocaleString()}<br>` +
+            `End: ${new Date(s.end*1000).toLocaleString()}<br>` +
+            `Dur: ${(s.end-s.start).toFixed(2)}s`
+          ),
+          hoverinfo: 'text',
+          marker: { color: legend[st] || '#93c5fd' }
+        };
+      });
+
+      Plotly.newPlot('timelinePlot', traces, {
+        barmode: 'overlay',
+        xaxis: { type: 'date', title: 'Time' },
+        yaxis: { title: 'Client', automargin: true },
+        margin: { l: 140, r: 20, t: 20, b: 60 },
+        legend: { orientation: 'h' }
+      }, {displayModeBar: true, responsive: true});
+    }
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
+"""
+
+
 class AIDashboardService:
     """
     Flask-compatible dashboard service for AI Client Manager.
@@ -435,6 +612,12 @@ class AIDashboardService:
             serializable_stats = self._make_json_serializable(raw_stats)
             return jsonify(serializable_stats)
 
+        @bp.route('/timeline', methods=['GET'])
+        @maybe_wrap
+        def timeline_view():
+            """Serve embedded Timeline page."""
+            return Response(FRONTEND_TIMELINE_HTML, mimetype='text/html')
+
         @bp.route('/api/clients/<client_name>/check', methods=['POST'])
         @maybe_wrap
         def trigger_health_check(client_name):
@@ -448,6 +631,45 @@ class AIDashboardService:
 
             threading.Thread(target=run_check, daemon=True).start()
             return jsonify({"message": f"Health check triggered for {client_name}"})
+
+        @bp.route('/api/runs', methods=['GET'])
+        @maybe_wrap
+        def api_runs():
+            """List recent run_id for timeline selection (via state logger)."""
+            state_logger = self.manager.get_state_logger() if hasattr(self.manager, "get_state_logger") else None
+            if not state_logger:
+                return jsonify({"runs": [], "warning": "state_logger is not enabled"}), 200
+
+            try:
+                return jsonify(state_logger.get_run_list(limit=50))
+            except Exception as e:
+                return jsonify({"runs": [], "error": str(e)}), 500
+
+        @bp.route('/api/timeline', methods=['GET'])
+        @maybe_wrap
+        def api_timeline():
+            """Return timeline intervals for plotting (via state logger)."""
+            state_logger = self.manager.get_state_logger() if hasattr(self.manager, "get_state_logger") else None
+            if not state_logger:
+                return jsonify({"items": [], "warning": "state_logger is not enabled"}), 200
+
+            run_id = (request.args.get("run_id") or "").strip()
+            if not run_id:
+                return jsonify({"error": "Missing run_id"}), 400
+
+            try:
+                from_ts = float(request.args.get("from", 0))
+                to_ts = float(request.args.get("to", time.time()))
+            except Exception:
+                return jsonify({"error": "Invalid from/to"}), 400
+
+            client_name = (request.args.get("client") or "").strip() or None
+
+            try:
+                data = state_logger.query_timeline(run_id=run_id, from_ts=from_ts, to_ts=to_ts, client_name=client_name)
+                return jsonify(data)
+            except Exception as e:
+                return jsonify({"error": str(e), "items": []}), 500
 
         @bp.route('/api/clients/<client_name>/status', methods=['POST'])
         @maybe_wrap

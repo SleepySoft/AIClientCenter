@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 
 from AIClientCenter.APIResult import APIResult
+from AIClientCenter.ClientStateSQLiteLogger import ClientStateSQLiteLogger
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,9 @@ class BaseAIClient(ABC):
                 BaseAIClient.__init__(self, ...)
     """
 
-    def __init__(self, name: str, api_token: str, priority: int = CLIENT_PRIORITY_NORMAL, group_id: str = "default"):
+    def __init__(self, name: str, api_token: str,
+                 priority: int = CLIENT_PRIORITY_NORMAL,
+                 group_id: str = "default"):
         """
         Initialize AI client with token and priority.
 
@@ -83,6 +86,7 @@ class BaseAIClient(ABC):
         self.api_token = api_token
         self.priority = priority
         self.group_id = group_id
+        self.event_sink: Optional[ClientStateSQLiteLogger] = None
 
         self._lock = threading.RLock()
         self._status = {
@@ -129,6 +133,20 @@ class BaseAIClient(ABC):
             self._status['in_use'] = True
             self._status['chat_count'] += 1
 
+        start_ts = time.time()
+        chosen_model = model or (self.get_current_model() if hasattr(self, "get_current_model") else None)
+
+        self._emit_event({
+            "type": "chat_start",
+            "ts": start_ts,
+            "client_name": self.name,
+            "model": chosen_model,
+            "is_health_check": bool(is_health_check),
+        })
+
+        final_success = False
+        final_error = None
+
         try:
             # Subclass implements this, returning the structured APIResult from API_CORE
             result: APIResult = self._chat_completion_sync(messages, model, temperature, max_tokens, is_health_check)
@@ -137,11 +155,16 @@ class BaseAIClient(ABC):
 
             # 1. Successful response (API_CORE handled all retries/connections)
             if result.get('success', False):
+                final_success = True
                 # result['data'] is the LLM response JSON
                 return self._handle_llm_response(result['data'], messages)
 
             # 2. Failed response (error reported by API_CORE)
             error_data = result.get('error')
+
+            final_success = False
+            final_error = error_data
+
             if error_data:
                 # Delegate to the unified error handler
                 return self._handle_unified_error(error_data)
@@ -151,6 +174,7 @@ class BaseAIClient(ABC):
             return self._handle_exception(ValueError("API client returned an ambiguous result."))
 
         except Exception as e:
+            final_error = {"type": "EXCEPTION", "code": '', "message": str(e)}
             # Catches errors happening outside of the API call (e.g., locking issue, subclass error)
             return self._handle_exception(e)
 
@@ -159,6 +183,18 @@ class BaseAIClient(ABC):
                 self._status['in_use'] = False
                 # 重要：无论成功或失败，只要尝试了 chat，都应该更新 last_chat
                 self._status['last_chat'] = time.time()
+
+            end_ts = time.time()
+
+            self._emit_event({
+                "type": "chat_end",
+                "ts": end_ts,
+                "client_name": self.name,
+                "model": chosen_model,
+                "is_health_check": bool(is_health_check),
+                "success": bool(final_success),
+                "error": final_error,  # may be None or dict
+            })
 
     def get_status(self, key: Optional[str] = None) -> Any:
         with self._lock:
@@ -287,6 +323,10 @@ class BaseAIClient(ABC):
 
     # ---------------------------------------- Not for user ----------------------------------------
 
+    def set_event_sink(self, sink_callable):
+        """Inject an external event sink: sink(event_dict) -> None."""
+        self.event_sink = sink_callable
+
     def _is_busy(self) -> bool:
         """Check if client is currently in use."""
         with self._lock:
@@ -377,7 +417,24 @@ class BaseAIClient(ABC):
             self._status['status_last_updated'] = 0.0 if new_status == ClientStatus.UNKNOWN else time.time()
 
             if old_status != new_status:
+                self._emit_event({
+                    "type": "status_change",
+                    "ts": time.time(),
+                    "client_name": self.name,
+                    "old_status": str(old_status),
+                    "new_status": str(new_status),
+                    # Optional: pass self so logger can derive idle state accurately
+                    "_client_obj": self
+                })
                 logger.info(f"Client {self.name} status changed from {old_status} to {new_status}")
+
+    def _emit_event(self, event: Dict[str, Any]):
+        """Best-effort event emission; never break core logic."""
+        try:
+            if callable(self.event_sink):
+                self.event_sink(event)
+        except Exception:
+            pass
 
     # ---------------------------------------- Error Handling (Unified) ----------------------------------------
 
@@ -557,7 +614,7 @@ class AIClientManager:
     health monitoring, and automatic client management.
     """
 
-    def __init__(self, base_check_interval_sec: int = 60, first_check_delay_sec: int = 10):
+    def __init__(self, base_check_interval_sec: int = 60, first_check_delay_sec: int = 10, state_logger=None):
         """
         Initialize client manager.
 
@@ -584,6 +641,8 @@ class AIClientManager:
         self.check_stable_interval = base_check_interval_sec * 15   # Interval when client is AVAILABLE
         self.first_check_delay_sec = first_check_delay_sec
 
+        self.state_logger = state_logger
+
     def register_client(self, client: Any):
         """
         Register a new AI client.
@@ -593,6 +652,13 @@ class AIClientManager:
             # Sort by priority (lower number = higher priority)
             # This ensures get_available_client always picks the best one first.
             self.clients.sort(key=lambda x: x.priority)
+
+            try:
+                if self.state_logger:
+                    self.state_logger.attach_client(client)
+            except Exception:
+                pass
+
             logger.info(f"Registered client: {getattr(client, 'name', 'Unknown')}")
 
     def set_group_limit(self, group_id: str, limit: int):
@@ -895,6 +961,10 @@ class AIClientManager:
             client._reset_error_count()
         return True
 
+    def get_state_logger(self):
+        """Expose state logger for dashboard and external integrations."""
+        return getattr(self, "state_logger", None)
+
     @staticmethod
     def format_stats_report(stats_data: Dict[str, Any]) -> str:
         """
@@ -996,6 +1066,12 @@ class AIClientManager:
         self.monitor_running = False
         if self.monitor_thread:
             self.monitor_thread.join(timeout=10)
+
+        try:
+            self.state_logger.stop()
+        except Exception:
+            pass
+
         logger.info("Stopped AI client monitoring")
 
     def _monitor_loop(self):
