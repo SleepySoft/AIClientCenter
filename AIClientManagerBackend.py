@@ -1133,7 +1133,16 @@ createApp({
       });
 
       const clients = [...new Set(items.map(x => x.client))].sort();
-      const height = Math.max(520, Math.min(920, 260 + clients.length * (this.compactMode ? 20 : 26)));
+        
+      // [TUNE] More compact height model to show more clients per screen
+      // - Row height: 16px (compact) / 18px (comfort)
+      // - Cap max height to avoid an extremely long chart
+      const rowH = this.compactMode ? 16 : 18;
+      const baseH = 260;
+      const maxH = 720;   // you can tune: 680~760
+      const minH = 520;
+        
+      const height = Math.max(minH, Math.min(maxH, baseH + clients.length * rowH));
 
       const traces = Object.keys(byState).map(st => {
         const segs = byState[st];
@@ -1167,7 +1176,7 @@ createApp({
         paper_bgcolor: "white",
         plot_bgcolor: "white",
         barmode: "overlay",
-        bargap: this.compactMode ? 0.72 : 0.64,
+        bargap: this.compactMode ? 0.84 : 0.78,
         legend: { orientation: "h", x: 0, y: -0.18 },
         uirevision: this.uiRevisionKey,
         xaxis: {
@@ -1180,7 +1189,9 @@ createApp({
           title: { text: "" },
           automargin: true,
           categoryorder: "array",
-          categoryarray: clients
+          categoryarray: clients,
+          fixedrange: true,
+          tickfont: { size: this.compactMode ? 10 : 11 }
         },
         dragmode: "pan",
         hovermode: "closest"
