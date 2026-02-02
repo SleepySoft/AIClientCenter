@@ -36,7 +36,8 @@ CLIENT_PRIORITY_LESS_PRECIOUS = CLIENT_PRIORITY_HIGHER
 
 # 设置全局默认 Socket 超时
 # 防止 DNS 解析或 SSL 握手无限期卡死（requests 的 timeout 有时管不到这里）
-socket.setdefaulttimeout(600)
+# 实践中来看，硅基流动的API频繁会触发这个timeout，设置短一些以提高效率。一般对话不会超过3分钟。
+socket.setdefaulttimeout(300)
 
 
 class ClientStatus(Enum):
