@@ -397,6 +397,10 @@ FRONTEND_TIMELINE_HTML = r"""
     .pill-active { border-color: rgba(79,70,229,.45); box-shadow: 0 0 0 2px rgba(79,70,229,.10); color:#4338ca; }
     #timelinePlot { min-height: 520px; }
     input[type="range"] { accent-color: #4f46e5; }
+    
+    /* [ADD] Rotate chevron when details is open */
+    details summary i { transition: transform .15s ease; }
+    details[open] summary i { transform: rotate(90deg); }
   </style>
 </head>
 
@@ -505,27 +509,98 @@ FRONTEND_TIMELINE_HTML = r"""
 
         <div class="mb-4">
           <div class="font-semibold mb-2">Summary</div>
-
+        
+          <!-- Core KPIs: Avg Util + Avg Lat in one compact block -->
           <div class="p-3 rounded-xl bg-white border mb-3">
-            <div class="text-xs muted">Utilization (RUN_*)</div>
-            <div class="mt-1 text-2xl font-bold">{{ (kpi.util*100).toFixed(1) }}%</div>
-            <div class="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden">
-              <div class="h-full bg-indigo-600" :style="{ width: Math.min(100, kpi.util*100) + '%' }"></div>
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-xs muted font-semibold">Core</div>
+              <div class="text-[11px] muted mono whitespace-nowrap">
+                {{ kpi.clientCount || 0 }} clients
+              </div>
             </div>
-            <div class="text-[11px] muted mt-2">Total RUN_* duration / window</div>
+        
+            <div class="mt-2 grid grid-cols-2 gap-3">
+              <!-- Avg Util -->
+              <div class="min-w-0">
+                <div class="text-[11px] muted whitespace-nowrap">Avg Util (RUN_*)</div>
+                <div class="mt-0.5 text-xl font-bold whitespace-nowrap">
+                  {{ (kpi.util*100).toFixed(1) }}%
+                </div>
+                <div class="mt-2 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                  <div class="h-full bg-indigo-600" :style="{ width: Math.min(100, kpi.util*100) + '%' }"></div>
+                </div>
+              </div>
+        
+              <!-- Avg Lat -->
+              <div class="min-w-0">
+                <div class="text-[11px] muted whitespace-nowrap">Avg Lat (completed)</div>
+                <div class="mt-0.5 text-xl font-bold whitespace-nowrap mono">
+                  {{ (kpi.avgLatency || 0).toFixed(2) }}s
+                </div>
+                <div class="mt-2 text-[11px] muted mono whitespace-nowrap truncate">
+                  RUN_* total: {{ (kpi.totalRunSec || 0).toFixed(1) }}s
+                </div>
+              </div>
+            </div>
           </div>
-
-          <div class="p-3 rounded-xl bg-white border mb-3">
-            <div class="text-xs muted">Avg latency (completed)</div>
-            <div class="mt-1 text-2xl font-bold">{{ kpi.avgLatency.toFixed(2) }}s</div>
-            <div class="text-[11px] muted mt-2">Mean of RUN_SUCCESS + RUN_FAIL</div>
-          </div>
-
-          <div class="p-3 rounded-xl bg-white border">
+        
+          <!-- Per-client details (still collapsed by default) -->
+          <details class="mt-3">
+            <summary class="cursor-pointer text-sm font-semibold text-gray-700 flex items-center gap-2">
+              <i class="fa-solid fa-chevron-right"></i>
+              Per-client details
+            </summary>
+        
+            <div class="mt-3 border rounded-xl overflow-hidden">
+              <div class="px-3 py-2 bg-gray-50 border-b text-xs muted flex items-center justify-between">
+                <span>Clients: <b class="text-gray-700">{{ kpi.clientCount || 0 }}</b></span>
+                <span>Total RUN_*: <b class="text-gray-700 mono">{{ (kpi.totalRunSec || 0).toFixed(1) }}s</b></span>
+              </div>
+        
+              <div class="max-h-72 overflow-auto">
+                <div v-for="c in perClientStats" :key="c.client" class="px-3 py-2 border-b last:border-b-0">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold truncate">{{ c.client }}</div>
+        
+                      <!-- (This meta line will be replaced in section B below) -->
+                      <!-- KEEP HERE ONLY AS PLACEHOLDER -->
+                      <div class="mt-1 flex items-center gap-1.5 text-[11px] muted mono overflow-x-auto whitespace-nowrap">
+                        <span class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">
+                          RUN {{ c.runSec.toFixed(1) }}s/{{ c.windowSec }}s
+                        </span>
+                        <span class="px-1.5 py-0.5 rounded bg-green-50 text-green-700">
+                          OK {{ c.successCnt }}
+                        </span>
+                        <span class="px-1.5 py-0.5 rounded bg-red-50 text-red-700">
+                          FAIL {{ c.failCnt }}
+                        </span>
+                        <span class="px-1.5 py-0.5 rounded bg-gray-50 text-gray-600">
+                          AVG {{ c.avgLatency===null ? '-' : (c.avgLatency.toFixed(2)+'s') }}
+                        </span>
+                      </div>
+                    </div>
+        
+                    <div class="w-24 text-right">
+                      <div class="text-sm font-bold whitespace-nowrap">{{ (c.util*100).toFixed(1) }}%</div>
+                    </div>
+                  </div>
+        
+                  <div class="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div class="h-full bg-indigo-600" :style="{width: Math.min(100, c.util*100) + '%'}"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+        
+          <!-- Keep your existing breakdown block below (do not change) -->
+          <div class="p-3 rounded-xl bg-white border mt-3">
             <div class="flex items-center justify-between">
               <div class="text-xs muted">State breakdown (by time)</div>
               <div class="text-xs muted">Segments: <b class="text-gray-700">{{ visibleItems.length }}</b></div>
             </div>
+        
             <div class="mt-3 space-y-2">
               <div v-for="row in breakdown" :key="row.state" class="flex items-center gap-2">
                 <div class="w-24 text-xs text-gray-700">{{ row.state }}</div>
@@ -535,6 +610,7 @@ FRONTEND_TIMELINE_HTML = r"""
                 <div class="w-10 text-xs muted text-right">{{ row.percent.toFixed(0) }}%</div>
               </div>
             </div>
+        
             <div class="mt-2 text-[11px] muted">
               Computed from segment durations (not counts).
             </div>
@@ -735,7 +811,8 @@ createApp({
 
       uiRevisionKey: "init",
 
-      kpi: { util: 0, avgLatency: 0 },
+      kpi: { util: 0, avgLatency: 0, totalRunSec: 0, clientCount: 0 },
+      perClientStats: [],
       
       wasClipped: false
     };
@@ -1101,22 +1178,100 @@ createApp({
         this.loading = false;
       }
     },
-
     calcKPI(){
-      const vis = this.visibleItems;
-      const win = Math.max(1, (this.toEpoch||0) - (this.fromEpoch||0));
-
-      let runDur = 0;
-      let completed = [];
-
-      vis.forEach(it => {
-        const d = Math.max(0, it.end - it.start);
-        if(String(it.state||"").startsWith("RUN_")) runDur += d;
-        if(it.state==="RUN_SUCCESS" || it.state==="RUN_FAIL") completed.push(d);
+      // IMPORTANT: use the same data scope as utilization:
+      // - visibleItems => respects clientSearch / other filters
+      // - items => global regardless of filters
+      // You requested: behavior consistent with utilization => keep visibleItems
+      const vis = this.visibleItems || [];
+      const win = Math.max(1, (this.toEpoch||0) - (this.fromEpoch||0)); // seconds
+    
+      // Clients appearing in the current scope (filtered => filtered; all => all)
+      const clientSet = new Set(vis.map(it => it.client || "Unknown"));
+      const clientList = Array.from(clientSet);
+      const N = Math.max(1, clientList.length);
+    
+      // Per-client accumulators
+      const byClient = {};
+      clientList.forEach(c => {
+        byClient[c] = {
+          client: c,
+          runSec: 0,
+    
+          // Completed (success/fail) latency stats
+          completedDurSum: 0,
+          completedCnt: 0,
+          successCnt: 0,
+          failCnt: 0
+        };
       });
-
-      this.kpi.util = runDur / win;
-      this.kpi.avgLatency = completed.length ? (completed.reduce((a,b)=>a+b,0)/completed.length) : 0;
+    
+      // Accumulate within current scope
+      vis.forEach(it => {
+        const c = it.client || "Unknown";
+        const st = it.state || "UNKNOWN";
+        const d = Math.max(0, (it.end||0) - (it.start||0));
+    
+        const rec = byClient[c] || (byClient[c] = {
+          client: c, runSec: 0, completedDurSum: 0, completedCnt: 0, successCnt: 0, failCnt: 0
+        });
+    
+        if (String(st).startsWith("RUN_")) {
+          rec.runSec += d;
+        }
+    
+        // Completed segments only
+        if (st === "RUN_SUCCESS") {
+          rec.successCnt += 1;
+          rec.completedCnt += 1;
+          rec.completedDurSum += d;
+        } else if (st === "RUN_FAIL") {
+          rec.failCnt += 1;
+          rec.completedCnt += 1;
+          rec.completedDurSum += d;
+        }
+      });
+    
+      // Build per-client metrics
+      const stats = Object.values(byClient).map(r => {
+        const util = Math.max(0, Math.min(1, r.runSec / win));
+        const avgLat = (r.completedCnt > 0) ? (r.completedDurSum / r.completedCnt) : null;
+    
+        return {
+          client: r.client,
+          windowSec: win,
+          runSec: r.runSec,
+          util,                 // 0..1
+    
+          // Per-client avg latency for completed segments only
+          avgLatency: avgLat,   // seconds or null
+    
+          successCnt: r.successCnt,
+          failCnt: r.failCnt,
+          completedCnt: r.completedCnt
+        };
+      });
+    
+      // Global average utilization: mean of per-client utilization (0..1)
+      const avgUtil = stats.reduce((a, x) => a + x.util, 0) / N;
+    
+      // Global avg latency (completed): weighted by completed counts (NOT avg-of-avgs)
+      const totalCompletedCnt = stats.reduce((a, x) => a + (x.completedCnt || 0), 0);
+      const totalCompletedDur = stats.reduce((a, x) => a + ((x.avgLatency === null) ? 0 : x.avgLatency * x.completedCnt), 0);
+      const globalAvgLatency = totalCompletedCnt > 0 ? (totalCompletedDur / totalCompletedCnt) : 0;
+    
+      // Total RUN_* time (for display, optional)
+      const totalRun = stats.reduce((a, x) => a + x.runSec, 0);
+    
+      // Save KPIs (clamp utilization)
+      this.kpi.util = Math.max(0, Math.min(1, avgUtil));
+      this.kpi.avgLatency = globalAvgLatency;
+      this.kpi.totalRunSec = totalRun;
+      this.kpi.clientCount = N;
+    
+      // Sort per-client list (util desc, then runSec desc)
+      stats.sort((a,b) => (b.util - a.util) || (b.runSec - a.runSec) || String(a.client).localeCompare(String(b.client)));
+      this.perClientStats = stats;
     },
 
     renderPlot(onlyRelayout){
