@@ -194,6 +194,7 @@ class BaseAIClient(ABC):
                 "is_health_check": bool(is_health_check),
                 "success": bool(final_success),
                 "error": final_error,  # may be None or dict
+                "_client_obj": self,
             })
 
     def get_status(self, key: Optional[str] = None) -> Any:
