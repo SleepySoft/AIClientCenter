@@ -577,6 +577,15 @@ def create_ollama_client(model: Optional[str] = None):
     return client
 
 
+def create_nvidia_client(token: Optional[str] = None, model: Optional[str] = None):
+    client = OpenAICompatibleAPI(
+        api_base_url='https://integrate.api.nvidia.com/v1',
+        token=token or os.getenv("NVIDIA_API_KEY"),
+        default_model=model or 'moonshotai/kimi-k2.5'
+    )
+    return client
+
+
 def create_siliconflow_client(token: Optional[str] = None, model: Optional[str] = None):
     client = OpenAICompatibleAPI(
         api_base_url='https://api.siliconflow.cn/v1',
