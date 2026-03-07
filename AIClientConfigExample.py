@@ -11,7 +11,8 @@ from AIClientCenter.AIClients import StandardOpenAIClient, \
     SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
 from AIClientCenter.AIClientManager import CLIENT_PRIORITY_EXPENSIVE, \
     CLIENT_PRIORITY_FREEBIE, BaseAIClient, CLIENT_PRIORITY_NORMAL, CLIENT_PRIORITY_CONSUMABLES
-from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
+from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client, \
+    create_long_cat_client
 from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
 from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 
@@ -79,6 +80,22 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     # sf_rotator_a.run_in_thread()
     # sf_rotator_b.run_in_thread()
+
+    # -------------- Longcat client --------------
+    # - Daily refresh invoking times limit.
+    # - Use this client by priority.
+    # ------------------------------------------------
+
+    longcat_api = create_long_cat_client('A valid token')
+    longcat_client = OuterTokenRotatingOpenAIClient(
+        name='Longcat Client',
+        openai_api=longcat_api,
+        priority=CLIENT_PRIORITY_NORMAL,
+        group_id='longcat',
+        balance_config={ 'hard_threshold': 0.1 }
+    )
+    # You can set the token limit but I just let it always seem healthy.
+    longcat_client.update_balance(10)
 
     # -------------- Model scope client --------------
     # - Daily refresh invoking times limit.
@@ -155,7 +172,8 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         'sf_client_b': sf_client_b,
         'ms_client': ms_client,
         'zhipu_client': zhipu_client,
-        'gemini': gemini_client_1
+        'longcat': longcat_client,
+        'gemini': gemini_client_1,
     }
 
 
@@ -165,5 +183,6 @@ AI_CLIENT_LIMIT = {
     'zhipu': 1,
     'model scope': 1,
     'silicon flow': 2,
+    'longcat_client': 2,
     'silicon flow proxy': 1,
 }

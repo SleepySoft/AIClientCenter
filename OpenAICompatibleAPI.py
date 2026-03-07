@@ -595,6 +595,15 @@ def create_siliconflow_client(token: Optional[str] = None, model: Optional[str] 
     return client
 
 
+def create_long_cat_client(token: Optional[str] = None, model: Optional[str] = None):
+    client = OpenAICompatibleAPI(
+        api_base_url='https://api.longcat.chat/openai/v1',
+        token=token or os.getenv("LONGCAT_API_KEY"),
+        default_model=model or 'LongCat-Flash-Thinking-2601'
+    )
+    return client
+
+
 def create_modelscope_client(token: Optional[str] = None, model: Optional[str] = None):
     client = OpenAICompatibleAPI(
         api_base_url='https://api-inference.modelscope.cn/v1',
