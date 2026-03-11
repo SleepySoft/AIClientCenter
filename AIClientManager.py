@@ -52,6 +52,12 @@ class ClientStatus(Enum):
         return cls.ERROR
 
 
+class ClientVisibility(Enum):
+    PUBLIC = "public"          # 正常参与自动分配
+    PRIVATE = "private"        # 默认不参与，除非调用者允许/指定
+    NAME_ONLY = "name_only"    # 只允许按 target_client_name 精确获取
+
+
 class BaseAIClient(ABC):
     """
     Base class for all AI clients.
@@ -72,9 +78,12 @@ class BaseAIClient(ABC):
                 BaseAIClient.__init__(self, ...)
     """
 
-    def __init__(self, name: str, api_token: str,
+    def __init__(self,
+                 name: str,
+                 api_token: str,
                  priority: int = CLIENT_PRIORITY_NORMAL,
-                 group_id: str = "default"):
+                 group_id: str = "default",
+                 visibility: ClientVisibility = ClientVisibility.PUBLIC):
         """
         Initialize AI client with token and priority.
 
@@ -87,6 +96,8 @@ class BaseAIClient(ABC):
         self.api_token = api_token
         self.priority = priority
         self.group_id = group_id
+        self.visibility = visibility
+
         self.event_sink: Optional[ClientStateSQLiteLogger] = None
 
         self._lock = threading.RLock()
@@ -668,23 +679,96 @@ class AIClientManager:
             self.group_limits[group_id] = limit
             logger.info(f"Set concurrency limit for group '{group_id}' to {limit}")
 
-    def get_available_client(self, user_name: str,
+    def get_available_client(self,
+                             user_name: str,
                              request_change: bool = False,
                              target_group_id: str = None,
-                             target_client_name: str = None) -> Optional[BaseAIClient]:
+                             target_client_name: str = None,
+                             allow_private: bool = False) -> Optional[BaseAIClient]:
         """
-        Get an available client for a specific user with enhanced filtering options.
+        Selects and acquires an *available* AI client for a given user, with optional
+        constraints (by name / by group) and allocation policy support (PUBLIC/PRIVATE/NAME_ONLY).
 
+        This API is designed for resource-managed client pools: it not only *selects* a client,
+        but also *acquires* it (client._acquire) and records the allocation in `user_client_map`.
+
+        --------------------------------------------------------------------
+        Key Concepts
+        --------------------------------------------------------------------
+        1) "Available" means ALL of the following:
+           - Client is not UNAVAILABLE
+           - Client is not in a disqualified ERROR state (error_count threshold)
+           - Client health score > 0 (calculate_health)
+           - Client is not busy and can be acquired (not _is_busy(), and _acquire() succeeds)
+           - Group concurrency limit is not violated (unless swapping within the same group)
+
+        2) Allocation Policy (visibility):
+           - PUBLIC: participates in normal auto selection
+           - PRIVATE: excluded from auto selection unless explicitly allowed
+           - NAME_ONLY: excluded from auto selection; only retrievable by explicit name targeting
+
+           Note: visibility is enforced in the condition-based selection path.
+                 When `target_client_name` is provided, it is treated as explicit authorization
+                 to retrieve the named client (even if PRIVATE/NAME_ONLY), but the client must
+                 still satisfy "available" checks.
+
+        --------------------------------------------------------------------
+        Precedence / Selection Rules
+        --------------------------------------------------------------------
+        Priority of constraints:
+        (A) target_client_name (highest precedence, explicit selection)
+            - If provided, the manager attempts to acquire *that exact client* by name.
+            - In this path, `target_group_id` and `allow_private` are not used for candidate filtering,
+              because the candidate is already uniquely identified.
+            - However, the named client must still pass availability checks:
+              status/health/busy/acquire, and group concurrency limits.
+            - If the user already holds that client, it will be returned and its last_used refreshed.
+
+        (B) condition-based selection (normal path)
+            - If target_client_name is not provided:
+                - Optionally filter by target_group_id
+                - Enforce visibility rules (PRIVATE requires allow_private or explicit group targeting)
+                - Honor request_change (exclude the current client's reuse as a candidate)
+                - Choose the best available client by priority order (lower priority number first)
+
+        request_change behavior:
+          - Indicates a preference to switch away from the current client.
+          - In the condition-based path, the current client is excluded when request_change=True.
+          - In the name-targeted path, explicit `target_client_name` overrides request_change
+            (i.e., name targeting wins, since it is an explicit user intent).
+
+        --------------------------------------------------------------------
+        Group Concurrency Limits and Swap Semantics
+        --------------------------------------------------------------------
+        Group limits enforce max concurrent acquisitions per group_id.
+        The implementation supports "swap" logic:
+          - When replacing a client's allocation within the same group, we do not count the
+            current user's held slot against the limit for selecting a replacement, so users can
+            switch clients without temporarily exceeding the limit.
+
+        --------------------------------------------------------------------
         Args:
-            user_name: The identifier for the user.
-            request_change: If True, the current client held by the user (if any) is excluded
-                            from selection. Effectively requests a "different" client.
-            target_group_id: If set, only clients belonging to this group are considered.
-            target_client_name: If set, strictly selects only the client with this name.
-                                Highest priority filter.
+            user_name:
+                Identifier for the requester. Used as key in `user_client_map`.
+            request_change:
+                If True, the user's current client (if any) will not be selected in the condition-based path.
+                (Explicit name targeting overrides this preference.)
+            target_group_id:
+                If set (and target_client_name is not set), only clients in this group are considered.
+            target_client_name:
+                If set, strictly selects the client with this name (explicit selection path).
+            allow_private:
+                If True, PRIVATE clients are allowed to participate in the condition-based selection path.
+                Does not affect the explicit name path (name targeting is already explicit authorization).
 
         Returns:
-            BaseAIClient or None.
+            Optional[BaseAIClient]:
+                A client that has been acquired and allocated to the user, or None if no suitable client
+                can be found/acquired under the given constraints.
+
+        Thread-Safety:
+            This method is protected by the manager's lock to ensure consistent allocation records
+            and to prevent races in concurrent acquisition/swap operations.
         """
         if not user_name:
             logger.error("user_name is required to get a client.")
@@ -719,82 +803,153 @@ class AIClientManager:
                 if gid:
                     current_group_usage[gid] = current_group_usage.get(gid, 0) + 1
 
-            # 4. Iterate through clients (Priority: High -> Low)
-            for client in self.clients:
-                client_name = getattr(client, 'name', '')
-                client_status = client.get_status('status')
-                gid = getattr(client, 'group_id', None)
+            if target_client_name:
+                self._get_available_client_by_name(user_name, target_client_name, current_client, current_group_usage)
+            return self._get_available_client_by_conditions(user_name, request_change, target_group_id, allow_private, current_client, current_group_usage)
 
-                # --- FILTER: Target Name (Highest Priority Strict Check) ---
-                if target_client_name and client_name != target_client_name:
+    def _get_available_client_by_name(self,
+                                      user_name: str,
+                                      target_client_name: str,
+                                      current_client,
+                                      current_group_usage
+                                      ) -> Optional[BaseAIClient]:
+        client = self.get_client_by_name(target_client_name)
+        if not client:
+            return None
+
+        client_name = getattr(client, 'name', '')
+        gid = getattr(client, 'group_id', None)
+        client_status = client.get_status('status')
+
+        # Health checks
+        if client_status == ClientStatus.UNAVAILABLE:
+            return None
+        if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
+            return None
+        if client.calculate_health() <= 0:
+            return None
+
+        # If user already holds this client, keep it (even if request_change=True, we treat name as override)
+        if client is current_client:
+            self.user_client_map[user_name]['last_used'] = time.time()
+            return client
+
+        # Group concurrency limit (allow swap within same group)
+        if gid in self.group_limits:
+            limit = self.group_limits[gid]
+            current_count = current_group_usage.get(gid, 0)
+
+            # If user already holds a client in the same group, switching won't increase group usage.
+            if current_client and getattr(current_client, "group_id", None) == gid:
+                current_count -= 1
+
+            if current_count >= limit:
+                return None
+
+        # Acquire busy check
+        if client._is_busy():
+            return None
+        if not client._acquire():
+            return None
+
+        # Switch from old client if exists
+        if current_client:
+            self._release_client_core(current_client)
+
+        self.user_client_map[user_name] = {"client": client, "last_used": time.time()}
+        logger.info(f"User {user_name} acquired client by name: {client_name}")
+        return client
+
+    def _get_available_client_by_conditions(self,
+                                            user_name: str,
+                                            request_change: bool,
+                                            target_group_id: str,
+                                            allow_private: bool,
+                                            current_client,
+                                            current_group_usage
+                                            ) -> Optional[BaseAIClient]:
+        # Iterate through clients (Priority: High -> Low)
+        for client in self.clients:
+            client_name = getattr(client, 'name', '')
+            client_status = client.get_status('status')
+            gid = getattr(client, 'group_id', None)
+
+            # --- FILTER: Visibility / Allocation Policy ---
+            vis = getattr(client, "visibility", None)
+
+            if vis == ClientVisibility.NAME_ONLY:
+                # 没有 target_client_name 的情况下，NAME_ONLY 永远不参与自动分配
+                continue
+            if vis == ClientVisibility.PRIVATE and not allow_private and not target_group_id:
+                # PRIVATE 默认不参与；除非 allow_private=True 或者你认为“指定 group 也算显式选择”
+                continue
+
+            # --- FILTER: Target Group ---
+            if target_group_id and gid != target_group_id:
+                continue
+
+            # --- FILTER: Request Change (Exclude Current) ---
+            # If user explicitly wants a change, the current client is not a candidate.
+            if request_change and client is current_client:
+                continue
+
+            # --- Standard Health Checks ---
+            if client_status == ClientStatus.UNAVAILABLE:
+                continue
+
+            # Error threshold check
+            if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
+                continue
+
+            # Dynamic health check
+            if client.calculate_health() <= 0:
+                continue
+
+            # --- FILTER: Group Concurrency Limits ---
+            # Logic: If it is the current user's client, they already hold the slot (limit ignored).
+            # BUT if request_change is True, we already skipped 'current_client' above,
+            # so we will treat every candidate as a 'new' acquisition subject to limits.
+            is_current_users_client = (client is current_client)
+
+            if not is_current_users_client and gid in self.group_limits:
+                limit = self.group_limits[gid]
+                current_count = current_group_usage.get(gid, 0)
+
+                if current_count >= limit:
+                    logger.debug(
+                        f"Skipping client {client_name}: Group '{gid}' limit reached ({current_count}/{limit})")
                     continue
 
-                # --- FILTER: Target Group ---
-                if target_group_id and gid != target_group_id:
-                    continue
+            # --- SELECTION LOGIC ---
 
-                # --- FILTER: Request Change (Exclude Current) ---
-                # If user explicitly wants a change, the current client is not a candidate.
-                if request_change and client is current_client:
-                    continue
+            # Case A: We found the client currently held by this user.
+            # (We only reach here if request_change is False, because of the filter above)
+            if client is current_client:
+                self.user_client_map[user_name]['last_used'] = time.time()
+                logger.debug(f"User {user_name} keeps current client: {client.name}")
+                return client
 
-                # --- Standard Health Checks ---
-                if client_status == ClientStatus.UNAVAILABLE:
-                    continue
+            # Case B: We found a free client (or the specific target requested).
+            if not client._is_busy():
+                # Attempt to acquire
+                if client._acquire():
+                    # Release old client if exists
+                    if current_client:
+                        self._release_client_core(current_client)
+                        logger.info(f"User {user_name} switching from {current_client.name} to {client.name}")
 
-                # Error threshold check
-                if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
-                    continue
-
-                # Dynamic health check
-                if client.calculate_health() <= 0:
-                    continue
-
-                # --- FILTER: Group Concurrency Limits ---
-                # Logic: If it is the current user's client, they already hold the slot (limit ignored).
-                # BUT if request_change is True, we already skipped 'current_client' above,
-                # so we will treat every candidate as a 'new' acquisition subject to limits.
-                is_current_users_client = (client is current_client)
-
-                if not is_current_users_client and gid in self.group_limits:
-                    limit = self.group_limits[gid]
-                    current_count = current_group_usage.get(gid, 0)
-
-                    if current_count >= limit:
-                        logger.debug(
-                            f"Skipping client {client_name}: Group '{gid}' limit reached ({current_count}/{limit})")
-                        continue
-
-                # --- SELECTION LOGIC ---
-
-                # Case A: We found the client currently held by this user.
-                # (We only reach here if request_change is False, because of the filter above)
-                if client is current_client:
-                    self.user_client_map[user_name]['last_used'] = time.time()
-                    logger.debug(f"User {user_name} keeps current client: {client.name}")
+                    # Update map
+                    self.user_client_map[user_name] = {
+                        "client": client,
+                        "last_used": time.time()
+                    }
+                    logger.info(f"User {user_name} acquired client: {client.name}")
                     return client
 
-                # Case B: We found a free client (or the specific target requested).
-                if not client._is_busy():
-                    # Attempt to acquire
-                    if client._acquire():
-                        # Release old client if exists
-                        if current_client:
-                            self._release_client_core(current_client)
-                            logger.info(f"User {user_name} switching from {current_client.name} to {client.name}")
-
-                        # Update map
-                        self.user_client_map[user_name] = {
-                            "client": client,
-                            "last_used": time.time()
-                        }
-                        logger.info(f"User {user_name} acquired client: {client.name}")
-                        return client
-
-            # End of Loop: No suitable client found.
-            # If target_client_name was set, it means that specific client is unavailable.
-            # If request_change was True, it means no OTHER client is available.
-            return None
+        # End of Loop: No suitable client found.
+        # If target_client_name was set, it means that specific client is unavailable.
+        # If request_change was True, it means no OTHER client is available.
+        return None
 
     def release_client(self, client: BaseAIClient | str):
         """
@@ -876,6 +1031,7 @@ class AIClientManager:
                         "type": client.__class__.__name__,
                         "group_id": getattr(client, "group_id", "default"),
                         "priority": client.priority,
+                        "visibility": getattr(client, "visibility", "public").value if hasattr(client, "visibility") else "public",
                     },
                     "state": {
                         "status": client.get_status('status'),
