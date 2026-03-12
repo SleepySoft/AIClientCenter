@@ -8,7 +8,7 @@ try:
     from .LimitMixins import ClientMetricsMixin
     from .AIServiceTokenRotator import RotatableClient
     from .OpenAICompatibleAPI import OpenAICompatibleAPI
-    from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
+    from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
 except ImportError:
     from SimpleRotator import SimpleRotator
     from LimitMixins import ClientMetricsMixin
@@ -37,6 +37,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             openai_api: OpenAICompatibleAPI,
             priority: int = CLIENT_PRIORITY_NORMAL,
             group_id: str = 'default',
+            visibility: ClientVisibility = ClientVisibility.PUBLIC,
             default_available: bool = False,
             quota_config: dict = None,
             balance_config: dict = None,
@@ -61,6 +62,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             api_token=openai_api.get_api_token(),
             priority=priority,
             group_id=group_id,
+            visibility=visibility,
 
             # Initialize ClientMetricsMixin
             quota_config=quota_config,
