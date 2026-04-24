@@ -15,6 +15,7 @@ from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create
     create_long_cat_client
 from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
 from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
+from AIClientCenter.OpenClawClient import OpenClawClient
 
 
 def build_ai_clients() -> Dict[str, BaseAIClient]:
@@ -164,6 +165,22 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         default_available=True
     )
 
+    # -------------- OpenClaw client --------------
+    # - Communicates with OpenClaw agents via CLI
+    # - Useful for routing requests through OpenClaw's agent system
+    # - Supports timeout and error handling
+    # ------------------------------------------------
+
+    # openclaw_client = OpenClawClient(
+    #     name='OpenClaw Asuka',
+    #     agent_id='asuka',
+    #     priority=CLIENT_PRIORITY_NORMAL,
+    #     group_id='openclaw',
+    #     default_available=True,
+    #     timeout=60,
+    #     thinking='low'
+    # )
+
     # --------------------------------------------------------
 
     return {
@@ -174,6 +191,7 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         'zhipu_client': zhipu_client,
         'longcat': longcat_client,
         'gemini': gemini_client_1,
+        # 'openclaw': openclaw_client,
     }
 
 
