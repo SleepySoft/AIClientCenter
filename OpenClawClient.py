@@ -1,16 +1,40 @@
 """
 OpenClaw Client for AIClientCenter
 
-Provides an interface to communicate with OpenClaw agents via the CLI.
+Provides an interface to communicate with OpenClaw agents via the Gateway WebSocket API.
 This client adapter allows seamless integration with the AIClientCenter's
 client management system, supporting health checks, error handling, and timeouts.
+
+------------------------------------------------------------------------------
+获取 Gateway Token 的方法
+------------------------------------------------------------------------------
+由于本程序与 OpenClaw Gateway 通常运行在不同机器上，token 必须显式传入，
+无法自动读取本地配置文件。以下是获取 token 的几种方式：
+
+1. 从 OpenClaw 配置文件读取（在 Gateway 所在机器执行）：
+   $ cat ~/.openclaw/openclaw.json | grep -o '"token": "[^"]*"'
+   或
+   $ cat ~/.openclaw/openclaw.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('gateway',{}).get('auth',{}).get('token',''))"
+
+2. 通过 openclaw gateway 命令查看（在 Gateway 所在机器执行）：
+   $ openclaw gateway status    # 查看 gateway 配置摘要
+   $ openclaw config get        # 查看完整配置
+
+3. 如果是 systemd/user 服务运行，token 通常在启动时由 OpenClaw 自动生成，
+   路径固定为 ~/.openclaw/openclaw.json，字段路径为 gateway.auth.token
+
+4. 若使用远程模式 (gateway.mode=remote)，token 可能通过环境变量
+   OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_AUTH_TOKEN 注入，需咨询部署者。
+
+注意：token 是 gateway 的访问凭证，请妥善保管，不要在日志中明文打印。
+------------------------------------------------------------------------------
 """
 
 import json
-import subprocess
 import threading
 import logging
 import time
+import uuid
 from typing import Dict, List, Optional, Any, Union
 
 # Handle relative/absolute imports
@@ -23,40 +47,53 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Optional WebSocket dependency
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    logger.warning("websocket-client not installed. OpenClawClient will not function.")
+
 
 class OpenClawClient(BaseAIClient):
     """
-    A client that communicates with OpenClaw agents via the `openclaw agent` CLI command.
+    A client that communicates with OpenClaw agents via the Gateway WebSocket API.
 
     Features:
-    - Subprocess-based communication with OpenClaw Gateway
-    - Configurable timeout to prevent hanging
+    - Direct WebSocket connection to OpenClaw Gateway (no CLI subprocess)
+    - Concurrent-friendly: multiple requests can share one connection
+    - Configurable timeout with per-request tracking
     - Structured error handling compatible with APIResult format
     - Health check support via test prompts
+    - Auto-reconnect on connection loss
 
     Usage:
         client = OpenClawClient(
             name='openclaw-asuka',
             agent_id='asuka',
+            gateway_url='ws://openclaw-host:18789',
+            gateway_token='<从Gateway机器获取的token>',
             priority=CLIENT_PRIORITY_NORMAL,
             timeout=60
         )
     """
 
-    # Class-level lock to prevent concurrent CLI calls which could overwhelm the gateway
-    _cli_lock = threading.RLock()
-
     def __init__(
         self,
         name: str,
         agent_id: str = "main",
+        gateway_url: str = "ws://127.0.0.1:18789",
+        gateway_token: Optional[str] = None,
         priority: int = CLIENT_PRIORITY_NORMAL,
         group_id: str = 'openclaw',
         visibility: ClientVisibility = ClientVisibility.PUBLIC,
         default_available: bool = True,
         timeout: int = 60,
         thinking: Optional[str] = None,
-        verbose: Optional[bool] = None
+        verbose: Optional[bool] = None,
+        auto_reconnect: bool = True,
+        max_reconnect_attempts: int = 3
     ):
         """
         Initialize the OpenClaw client.
@@ -64,31 +101,244 @@ class OpenClawClient(BaseAIClient):
         Args:
             name: Unique identifier for this client instance
             agent_id: OpenClaw agent ID to target (e.g., 'main', 'asuka', 'kaori')
+            gateway_url: WebSocket URL of the OpenClaw Gateway
+                         示例: ws://192.168.1.100:18789 或 wss://remote.example.com:18789
+            gateway_token: Gateway 认证 token (必需)。获取方式见模块顶部注释。
             priority: Scheduling priority (lower is better)
             group_id: Client group for concurrency limits
             visibility: PUBLIC/PRIVATE/NAME_ONLY visibility setting
             default_available: Whether to mark as AVAILABLE immediately
-            timeout: Maximum seconds to wait for OpenClaw CLI response
+            timeout: Maximum seconds to wait for Gateway response
             thinking: Thinking level override (off/minimal/low/medium/high/xhigh)
             verbose: Verbose mode override
+            auto_reconnect: Whether to auto-reconnect on connection loss
+            max_reconnect_attempts: Max reconnection attempts before giving up
         """
-        # Use a placeholder token since OpenClaw uses its own auth
         super().__init__(
             name=name,
-            api_token="openclaw-cli",
+            api_token="openclaw-ws",
             priority=priority,
             group_id=group_id,
             visibility=visibility
         )
 
+        if not WEBSOCKET_AVAILABLE:
+            logger.error("websocket-client is required for OpenClawClient. Install: pip install websocket-client")
+            self._status['status'] = ClientStatus.ERROR
+            return
+
         self.agent_id = agent_id
-        self.timeout = max(10, timeout)  # Minimum 10s timeout
+        self.timeout = max(10, timeout)
         self.thinking = thinking
         self.verbose = verbose
         self._model_name = f"openclaw/{agent_id}"
 
+        # Gateway configuration
+        self.gateway_url = gateway_url
+        if not gateway_token:
+            logger.warning(
+                "[OpenClawClient] gateway_token is empty! "
+                "This client will fail to connect. "
+                "Please provide a valid token (see module docstring for how to obtain one)."
+            )
+        self.gateway_token = gateway_token
+        self.auto_reconnect = auto_reconnect
+        self.max_reconnect_attempts = max_reconnect_attempts
+
+        # Connection state
+        self._ws: Optional[websocket.WebSocket] = None
+        self._connected = False
+        self._lock = threading.RLock()
+        self._pending_requests: Dict[str, threading.Event] = {}
+        self._responses: Dict[str, Any] = {}
+        self._req_counter = 0
+        self._req_counter_lock = threading.Lock()
+
+        # Background thread for connection maintenance
+        self._connect()
+
         if default_available:
             self._status['status'] = ClientStatus.AVAILABLE
+
+    # ------------------ Connection Management ------------------
+
+    def _connect(self) -> bool:
+        """Establish WebSocket connection to Gateway."""
+        with self._lock:
+            if self._connected and self._ws:
+                return True
+
+            try:
+                logger.debug(f"[{self.name}] Connecting to {self.gateway_url}")
+                self._ws = websocket.create_connection(
+                    self.gateway_url,
+                    timeout=10,
+                    enable_multithread=True
+                )
+
+                # Send connect handshake
+                connect_req = {
+                    "type": "req",
+                    "id": self._next_req_id(),
+                    "method": "connect",
+                    "params": {
+                        "minProtocol": 1,
+                        "maxProtocol": 1,
+                        "client": {
+                            "id": "ai-client-center",
+                            "version": "1.0.0",
+                            "platform": "python",
+                            "mode": "operator"
+                        },
+                        "auth": {
+                            "token": self.gateway_token
+                        } if self.gateway_token else {}
+                    }
+                }
+                self._ws.send(json.dumps(connect_req))
+                resp = json.loads(self._ws.recv())
+
+                if resp.get("ok"):
+                    self._connected = True
+                    logger.info(f"[{self.name}] Connected to OpenClaw Gateway")
+                    # Start a background thread to listen for events/responses
+                    threading.Thread(target=self._receive_loop, daemon=True).start()
+                    return True
+                else:
+                    error = resp.get("error", {}).get("message", "Unknown error")
+                    logger.error(f"[{self.name}] Gateway connect failed: {error}")
+                    self._ws.close()
+                    self._ws = None
+                    return False
+
+            except Exception as e:
+                logger.error(f"[{self.name}] Connection error: {e}")
+                if self._ws:
+                    self._ws.close()
+                    self._ws = None
+                return False
+
+    def _disconnect(self):
+        """Close WebSocket connection."""
+        with self._lock:
+            self._connected = False
+            if self._ws:
+                try:
+                    self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
+
+    def _reconnect(self) -> bool:
+        """Attempt to reconnect with backoff."""
+        self._disconnect()
+        for attempt in range(self.max_reconnect_attempts):
+            logger.debug(f"[{self.name}] Reconnect attempt {attempt + 1}/{self.max_reconnect_attempts}")
+            if self._connect():
+                return True
+            time.sleep(min(2 ** attempt, 10))  # Exponential backoff, max 10s
+        logger.error(f"[{self.name}] Failed to reconnect after {self.max_reconnect_attempts} attempts")
+        return False
+
+    def _receive_loop(self):
+        """Background thread: receive responses and route to pending requests."""
+        while self._connected and self._ws:
+            try:
+                raw = self._ws.recv()
+                if not raw:
+                    continue
+                msg = json.loads(raw)
+
+                if msg.get("type") == "res":
+                    req_id = msg.get("id")
+                    if req_id in self._pending_requests:
+                        self._responses[req_id] = msg
+                        self._pending_requests[req_id].set()
+                    else:
+                        # Response for unknown request (e.g., server push)
+                        logger.debug(f"[{self.name}] Unsolicited response: {msg}")
+
+                elif msg.get("type") == "event":
+                    # Handle server events (chat updates, etc.)
+                    logger.debug(f"[{self.name}] Event: {msg.get('event')}")
+
+            except websocket.WebSocketConnectionClosedException:
+                logger.warning(f"[{self.name}] Connection closed")
+                self._connected = False
+                break
+            except json.JSONDecodeError as e:
+                logger.warning(f"[{self.name}] Invalid JSON received: {e}")
+            except Exception as e:
+                logger.error(f"[{self.name}] Receive error: {e}")
+                self._connected = False
+                break
+
+        # If auto-reconnect is enabled, try to reconnect
+        if self.auto_reconnect:
+            logger.info(f"[{self.name}] Connection lost, attempting reconnect...")
+            self._reconnect()
+
+    def _next_req_id(self) -> str:
+        """Generate unique request ID."""
+        with self._req_counter_lock:
+            self._req_counter += 1
+            return f"{self.name}-{self._req_counter}-{uuid.uuid4().hex[:8]}"
+
+    def _send_request(self, method: str, params: Dict[str, Any], timeout_ms: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Send a request via WebSocket and wait for response.
+        Thread-safe; multiple callers can share the same connection.
+        """
+        if not WEBSOCKET_AVAILABLE:
+            raise RuntimeError("websocket-client not installed")
+
+        # Ensure connection
+        if not self._connected or not self._ws:
+            if not self._reconnect():
+                raise ConnectionError("Not connected to OpenClaw Gateway")
+
+        req_id = self._next_req_id()
+        req = {
+            "type": "req",
+            "id": req_id,
+            "method": method,
+            "params": params
+        }
+
+        # Setup pending request tracking
+        event = threading.Event()
+        with self._lock:
+            self._pending_requests[req_id] = event
+            self._responses.pop(req_id, None)  # Clear any stale response
+
+        try:
+            # Send the request
+            with self._lock:
+                if not self._ws:
+                    raise ConnectionError("WebSocket not available")
+                self._ws.send(json.dumps(req))
+
+            # Wait for response
+            timeout_sec = (timeout_ms or self.timeout * 1000) / 1000.0
+            if not event.wait(timeout=timeout_sec):
+                raise TimeoutError(f"Request {req_id} timed out after {timeout_sec}s")
+
+            # Retrieve response
+            resp = self._responses.pop(req_id, None)
+            if not resp:
+                raise RuntimeError("Response was set but not found")
+
+            if not resp.get("ok"):
+                error = resp.get("error", {})
+                raise RuntimeError(f"Gateway error: {error.get('message', 'Unknown')}")
+
+            return resp.get("payload", {})
+
+        finally:
+            # Cleanup
+            with self._lock:
+                self._pending_requests.pop(req_id, None)
+                self._responses.pop(req_id, None)
 
     # ------------------ BaseAIClient Interface ------------------
 
@@ -110,8 +360,8 @@ class OpenClawClient(BaseAIClient):
         return self._model_name
 
     def get_api_base_url(self) -> str:
-        """Return a pseudo API base URL."""
-        return f"openclaw://agent/{self.agent_id}"
+        """Return the WebSocket URL of the Gateway."""
+        return self.gateway_url
 
     def _chat_completion_sync(
         self,
@@ -122,40 +372,62 @@ class OpenClawClient(BaseAIClient):
         is_health_check: bool = False
     ) -> APIResult:
         """
-        Execute a chat completion via OpenClaw CLI.
+        Execute a chat completion via OpenClaw Gateway WebSocket API.
 
         Flow:
         1. Convert messages to a single prompt string
-        2. Build the openclaw agent command
-        3. Execute with timeout protection
-        4. Parse JSON response
-        5. Convert to OpenAI-compatible format
+        2. Send chat.send request via WebSocket
+        3. Wait for response
+        4. Convert to OpenAI-compatible format
         """
-        # Build prompt from messages (take the last user message, or concatenate)
+        if not WEBSOCKET_AVAILABLE:
+            return self._make_error_result(
+                "PERMANENT",
+                "MISSING_DEPENDENCY",
+                "websocket-client not installed. Run: pip install websocket-client"
+            )
+
+        # Build prompt from messages
         prompt = self._extract_prompt(messages)
         if not prompt.strip():
             return self._make_error_result("BAD_REQUEST", "EMPTY_PROMPT", "No user message found in the conversation")
 
-        # Build CLI command
-        cmd = self._build_command(prompt, is_health_check)
+        # Build request parameters
+        params = {
+            "sessionKey": f"agent:{self.agent_id}",
+            "message": prompt,
+            "idempotencyKey": str(uuid.uuid4()),
+            "timeoutMs": min(15000, self.timeout * 1000) if is_health_check else self.timeout * 1000
+        }
 
-        # Execute with lock and timeout
+        if self.thinking:
+            params["thinking"] = self.thinking
+
         try:
-            result = self._execute_cli(cmd)
-            return self._parse_response(result, is_health_check)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"OpenClaw client {self.name} timed out after {self.timeout}s")
+            # Send via WebSocket
+            payload = self._send_request("chat.send", params)
+            return self._parse_response(payload, is_health_check)
+
+        except TimeoutError:
+            logger.warning(f"[{self.name}] Gateway request timed out")
             return self._make_error_result(
                 "TRANSIENT_NETWORK",
-                "CLI_TIMEOUT",
-                f"OpenClaw CLI command timed out after {self.timeout} seconds"
+                "GATEWAY_TIMEOUT",
+                f"OpenClaw Gateway request timed out after {self.timeout}s"
+            )
+        except ConnectionError as e:
+            logger.error(f"[{self.name}] Connection error: {e}")
+            return self._make_error_result(
+                "TRANSIENT_NETWORK",
+                "CONNECTION_ERROR",
+                f"Failed to connect to OpenClaw Gateway: {str(e)}"
             )
         except Exception as e:
-            logger.error(f"OpenClaw client {self.name} execution error: {e}")
+            logger.error(f"[{self.name}] Request error: {e}")
             return self._make_error_result(
-                "PERMANENT",
-                "CLI_EXECUTION_ERROR",
-                f"Failed to execute OpenClaw CLI: {str(e)}"
+                "TRANSIENT_SERVER",
+                "GATEWAY_ERROR",
+                f"OpenClaw Gateway error: {str(e)}"
             )
 
     # ------------------ Internal Helpers ------------------
@@ -179,118 +451,11 @@ class OpenClawClient(BaseAIClient):
                 parts.append(f"[{role}] {content}")
         return "\n".join(parts)
 
-    def _extract_clean_error(self, stderr: str, stdout: str) -> str:
+    def _parse_response(self, payload: Dict[str, Any], is_health_check: bool) -> APIResult:
         """
-        Extract a clean error message from CLI output, removing plugin noise.
+        Parse the Gateway response payload into APIResult format.
 
-        OpenClaw outputs plugin registration lines and other noise to stderr.
-        This method extracts the actual error message.
-        """
-        # Prefer stderr for error messages
-        source = stderr if stderr else stdout
-        lines = source.split('\n')
-
-        # Filter out plugin noise lines
-        noise_prefixes = [
-            '[plugins]',
-            '[qqbot-',
-            'Registered QQ',
-            'Set plugins.allow',
-            'discovered non-bundled plugins',
-        ]
-
-        clean_lines = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # Skip noise lines
-            if any(line.startswith(prefix) for prefix in noise_prefixes):
-                continue
-            clean_lines.append(line)
-
-        if clean_lines:
-            return ' '.join(clean_lines)
-
-        # Fallback: return truncated original
-        return (stderr or stdout)[:500]
-
-    def _build_command(self, prompt: str, is_health_check: bool) -> List[str]:
-        """Build the openclaw agent CLI command."""
-        cmd = [
-            "openclaw", "agent",
-            "--agent", self.agent_id,
-            "--message", prompt,
-            "--json",
-            "--timeout", str(self.timeout)
-        ]
-
-        if is_health_check:
-            # Use shorter timeout for health checks
-            cmd[-1] = str(min(15, self.timeout))
-
-        if self.thinking:
-            cmd.extend(["--thinking", self.thinking])
-
-        if self.verbose is not None:
-            cmd.extend(["--verbose", "on" if self.verbose else "off"])
-
-        return cmd
-
-    def _execute_cli(self, cmd: List[str]) -> Dict[str, Any]:
-        """
-        Execute the CLI command with proper timeout and error handling.
-
-        Uses a class-level lock to prevent concurrent CLI calls that could
-        overwhelm the OpenClaw gateway.
-        """
-        with self._cli_lock:
-            logger.debug(f"[{self.name}] Executing: {' '.join(cmd)}")
-            start_time = time.time()
-
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout + 5,  # Add buffer for subprocess overhead
-                    check=False  # Don't raise on non-zero exit
-                )
-
-                elapsed = time.time() - start_time
-                logger.debug(f"[{self.name}] CLI completed in {elapsed:.2f}s (exit={result.returncode})")
-
-                if result.returncode != 0:
-                    stderr = result.stderr.strip() if result.stderr else ""
-                    stdout = result.stdout.strip() if result.stdout else ""
-
-                    # Check for specific error patterns
-                    if "timeout" in stderr.lower() or "timeout" in stdout.lower():
-                        raise subprocess.TimeoutExpired(cmd, self.timeout)
-
-                    clean_error = self._extract_clean_error(stderr, stdout)
-                    raise RuntimeError(f"OpenClaw CLI failed (exit={result.returncode}): {clean_error}")
-
-                # Parse JSON output
-                output = result.stdout.strip()
-                if not output:
-                    raise ValueError("OpenClaw CLI returned empty output")
-
-                return json.loads(output)
-
-            except json.JSONDecodeError as e:
-                # Try to extract JSON from partial output
-                output = result.stdout.strip() if 'result' in dir() else ""
-                parsed = self._extract_json_from_output(output)
-                if parsed:
-                    return parsed
-                raise ValueError(f"Failed to parse OpenClaw output as JSON: {e}")
-
-    def _parse_response(self, result: Dict[str, Any], is_health_check: bool) -> APIResult:
-        """
-        Parse the OpenClaw CLI JSON response into APIResult format.
-
-        OpenClaw response format:
+        Expected payload format from chat.send:
         {
             "runId": "...",
             "status": "ok|error",
@@ -301,17 +466,17 @@ class OpenClawClient(BaseAIClient):
             }
         }
         """
-        status = result.get("status", "unknown")
+        status = payload.get("status", "unknown")
 
         if status != "ok":
-            summary = result.get("summary", "Unknown error")
+            summary = payload.get("summary", "Unknown error")
             return self._make_error_result(
                 "TRANSIENT_SERVER",
                 "OPENCLAW_ERROR",
                 f"OpenClaw returned status '{status}': {summary}"
             )
 
-        result_data = result.get("result", {})
+        result_data = payload.get("result", {})
         payloads = result_data.get("payloads", [])
 
         if not payloads:
@@ -323,8 +488,8 @@ class OpenClawClient(BaseAIClient):
 
         # Extract text from payloads
         texts = []
-        for payload in payloads:
-            text = payload.get("text", "")
+        for p in payloads:
+            text = p.get("text", "")
             if text:
                 texts.append(text)
 
@@ -339,7 +504,7 @@ class OpenClawClient(BaseAIClient):
 
         # Convert to OpenAI-compatible format
         openai_response = {
-            "id": result.get("runId", "openclaw-" + str(int(time.time()))),
+            "id": payload.get("runId", f"openclaw-{int(time.time())}"),
             "object": "chat.completion",
             "created": int(time.time()),
             "model": self._model_name,
@@ -369,7 +534,6 @@ class OpenClawClient(BaseAIClient):
         usage = agent_meta.get("usage", {})
         last_call = agent_meta.get("lastCallUsage", {})
 
-        # Prefer lastCallUsage if available, fallback to usage
         prompt_tokens = last_call.get("input", usage.get("input", 0))
         completion_tokens = last_call.get("output", usage.get("output", 0))
         total_tokens = last_call.get("total", usage.get("total", prompt_tokens + completion_tokens))
@@ -379,43 +543,6 @@ class OpenClawClient(BaseAIClient):
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens
         }
-
-    def _extract_json_from_output(self, output: str) -> Optional[Dict[str, Any]]:
-        """
-        Try to extract JSON from mixed output (handles plugin log lines before JSON).
-
-        OpenClaw may output plugin registration lines before the JSON response:
-        [plugins] plugins.allow is empty...
-        [qqbot-channel-api] Registered...
-        {"status": "ok", ...}
-        """
-        # Find the first '{' that starts a JSON object
-        brace_idx = output.find('{')
-        if brace_idx == -1:
-            return None
-
-        json_part = output[brace_idx:]
-
-        # Try to find matching braces
-        depth = 0
-        end_idx = 0
-        for i, char in enumerate(json_part):
-            if char == '{':
-                depth += 1
-            elif char == '}':
-                depth -= 1
-                if depth == 0:
-                    end_idx = i + 1
-                    break
-
-        if end_idx == 0:
-            # Didn't find matching close, try the whole thing
-            end_idx = len(json_part)
-
-        try:
-            return json.loads(json_part[:end_idx])
-        except json.JSONDecodeError:
-            return None
 
     def _make_error_result(self, error_type: str, error_code: str, message: str) -> APIResult:
         """Create a standardized error result."""
@@ -435,7 +562,17 @@ class OpenClawClient(BaseAIClient):
         """
         Override health check to use OpenClaw-specific test.
         """
+        if not WEBSOCKET_AVAILABLE:
+            self.complain_error("websocket-client not installed")
+            return False
+
         try:
+            # Ensure connection before test
+            if not self._connected:
+                if not self._reconnect():
+                    self.complain_error("Cannot connect to Gateway for health check")
+                    return False
+
             result = self.chat(
                 messages=[{"role": "user", "content": self.test_prompt}],
                 max_tokens=100
@@ -460,12 +597,25 @@ class OpenClawClient(BaseAIClient):
             with self._lock:
                 self._status['last_test'] = time.time()
 
+    def close(self):
+        """Clean up resources. Call this when done with the client."""
+        self._disconnect()
+
+    def __del__(self):
+        """Destructor to ensure connection is closed."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 # ------------------ Factory Functions ------------------
 
 def create_openclaw_client(
     name: str,
     agent_id: str = "main",
+    gateway_url: str = "ws://127.0.0.1:18789",
+    gateway_token: str = "",
     priority: int = CLIENT_PRIORITY_NORMAL,
     timeout: int = 60,
     **kwargs
@@ -473,11 +623,17 @@ def create_openclaw_client(
     """
     Factory function to create an OpenClaw client with common defaults.
 
+    由于程序与 OpenClaw 通常不在同一台机器上，token 必须从 Gateway 所在机器获取后
+    显式传入。获取方式见模块顶部注释。
+
     Args:
         name: Client name
         agent_id: OpenClaw agent ID
+        gateway_url: WebSocket URL of the OpenClaw Gateway
+                     示例: ws://192.168.1.100:18789
+        gateway_token: Gateway 认证 token (必需)
         priority: Client priority
-        timeout: CLI timeout in seconds
+        timeout: Request timeout in seconds
         **kwargs: Additional arguments passed to OpenClawClient
 
     Returns:
@@ -486,6 +642,8 @@ def create_openclaw_client(
     return OpenClawClient(
         name=name,
         agent_id=agent_id,
+        gateway_url=gateway_url,
+        gateway_token=gateway_token,
         priority=priority,
         timeout=timeout,
         **kwargs
