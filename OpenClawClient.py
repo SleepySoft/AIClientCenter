@@ -35,6 +35,8 @@ import threading
 import logging
 import time
 import uuid
+import os
+import base64
 from typing import Dict, List, Optional, Any, Union
 
 # Handle relative/absolute imports
@@ -54,6 +56,13 @@ try:
 except ImportError:
     WEBSOCKET_AVAILABLE = False
     logger.warning("websocket-client not installed. OpenClawClient will not function.")
+
+# Optional cryptography for device identity signing
+try:
+    from cryptography.hazmat.primitives import serialization
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
 
 
 class OpenClawClient(BaseAIClient):
@@ -154,6 +163,9 @@ class OpenClawClient(BaseAIClient):
         self._req_counter = 0
         self._req_counter_lock = threading.Lock()
 
+        # Chat event storage: runId -> final chat event (for retrieving agent responses)
+        self._chat_events: Dict[str, Any] = {}
+
         # Background thread for connection maintenance
         self._connect()
 
@@ -170,33 +182,93 @@ class OpenClawClient(BaseAIClient):
 
             try:
                 logger.debug(f"[{self.name}] Connecting to {self.gateway_url}")
-                self._ws = websocket.create_connection(
-                    self.gateway_url,
-                    timeout=10,
-                    enable_multithread=True
-                )
+                # Temporarily disable proxy to prevent websocket-client from using HTTP_PROXY
+                # (local proxies often don't support WebSocket upgrade correctly)
+                import os as _os
+                _proxy_keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+                _proxy_backup = {k: _os.environ.pop(k, None) for k in _proxy_keys}
+                try:
+                    self._ws = websocket.create_connection(
+                        self.gateway_url,
+                        timeout=10,
+                        enable_multithread=True
+                    )
+                finally:
+                    for k, v in _proxy_backup.items():
+                        if v is not None:
+                            _os.environ[k] = v
 
-                # Send connect handshake
+                # 1. Receive connect.challenge
+                raw_challenge = self._ws.recv()
+                challenge_msg = json.loads(raw_challenge)
+                if challenge_msg.get("event") != "connect.challenge":
+                    logger.error(f"[{self.name}] Expected connect.challenge, got: {challenge_msg}")
+                    self._ws.close()
+                    self._ws = None
+                    return False
+
+                nonce = challenge_msg.get("payload", {}).get("nonce", "")
+                logger.debug(f"[{self.name}] Received connect.challenge nonce={nonce[:16]}...")
+
+                # 2. Build connect handshake (with optional device identity)
+                device = self._build_device_signature(nonce) if CRYPTO_AVAILABLE else None
+                connect_params = {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "role": "operator",
+                    "scopes": ["operator.write"],
+                    "client": {
+                        "id": "gateway-client",
+                        "version": "1.0.0",
+                        "platform": "python",
+                        "mode": "backend"
+                    },
+                    "auth": {
+                        "token": self.gateway_token
+                    } if self.gateway_token else {}
+                }
+                # If we have a device identity, use its metadata and attach device field
+                if device:
+                    meta = device.get("_meta", {})
+                    connect_params["client"]["id"] = meta.get("clientId", "gateway-client")
+                    connect_params["client"]["mode"] = meta.get("clientMode", "backend")
+                    connect_params["client"]["platform"] = meta.get("platform", "python")
+                    connect_params["device"] = {
+                        "id": device["id"],
+                        "publicKey": device["publicKey"],
+                        "signature": device["signature"],
+                        "signedAt": device["signedAt"],
+                        "nonce": device["nonce"]
+                    }
+
                 connect_req = {
                     "type": "req",
                     "id": self._next_req_id(),
                     "method": "connect",
-                    "params": {
-                        "minProtocol": 1,
-                        "maxProtocol": 1,
-                        "client": {
-                            "id": "ai-client-center",
-                            "version": "1.0.0",
-                            "platform": "python",
-                            "mode": "operator"
-                        },
-                        "auth": {
-                            "token": self.gateway_token
-                        } if self.gateway_token else {}
-                    }
+                    "params": connect_params
                 }
                 self._ws.send(json.dumps(connect_req))
-                resp = json.loads(self._ws.recv())
+
+                # 3. Receive connect response (ignore health/tick events that may arrive first)
+                start = time.time()
+                resp = None
+                while time.time() - start < 10:
+                    raw_resp = self._ws.recv()
+                    if not raw_resp.strip():
+                        continue
+                    resp = json.loads(raw_resp)
+                    if resp.get("type") == "res" and resp.get("id") == connect_req["id"]:
+                        break
+                    # Ignore server-push events
+                    if resp.get("type") == "event":
+                        continue
+                    logger.debug(f"[{self.name}] Unexpected frame during connect: {resp.get('type')}")
+
+                if resp is None:
+                    logger.error(f"[{self.name}] Connect response timeout")
+                    self._ws.close()
+                    self._ws = None
+                    return False
 
                 if resp.get("ok"):
                     self._connected = True
@@ -217,6 +289,81 @@ class OpenClawClient(BaseAIClient):
                     self._ws.close()
                     self._ws = None
                 return False
+
+    def _build_device_signature(self, nonce: str) -> Optional[Dict[str, Any]]:
+        """Build device identity payload for connect handshake.
+
+        Reads local device identity from ~/.openclaw/identity/device.json and
+        ~/.openclaw/devices/paired.json, then signs a v3 payload using Ed25519.
+        Returns None if no device identity is available or cryptography is missing.
+        """
+        if not CRYPTO_AVAILABLE:
+            return None
+        try:
+            device_json_path = os.path.expanduser("~/.openclaw/identity/device.json")
+            paired_json_path = os.path.expanduser("~/.openclaw/devices/paired.json")
+            if not os.path.exists(device_json_path) or not os.path.exists(paired_json_path):
+                return None
+
+            with open(device_json_path) as f:
+                device_identity = json.load(f)
+            with open(paired_json_path) as f:
+                paired_devices = json.load(f)
+
+            device_id = device_identity.get("deviceId")
+            private_key_pem = device_identity.get("privateKeyPem")
+            if not device_id or not private_key_pem:
+                return None
+
+            paired = paired_devices.get(device_id, {})
+            public_key_b64url = paired.get("publicKey")
+            if not public_key_b64url:
+                return None
+
+            # Use paired device metadata so the server accepts it without re-pairing
+            client_id = paired.get("clientId", "gateway-client")
+            client_mode = paired.get("clientMode", "backend")
+            platform = paired.get("platform", "python")
+            role = paired.get("role", "operator")
+            scopes = paired.get("scopes", ["operator.write"])
+            device_family = paired.get("deviceFamily", "")
+
+            signed_at_ms = int(time.time() * 1000)
+            token = self.gateway_token or ""
+
+            # Build v3 payload: v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily
+            scopes_str = ",".join(scopes)
+            platform_norm = platform.strip().lower() if platform else ""
+            family_norm = device_family.strip().lower() if device_family else ""
+            payload = "|".join([
+                "v3", device_id, client_id, client_mode, role, scopes_str,
+                str(signed_at_ms), token, nonce, platform_norm, family_norm
+            ])
+
+            # Sign with Ed25519 private key
+            private_key = serialization.load_pem_private_key(
+                private_key_pem.encode("utf-8"), password=None
+            )
+            signature = private_key.sign(payload.encode("utf-8"))
+            signature_b64url = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+
+            return {
+                "id": device_id,
+                "publicKey": public_key_b64url,
+                "signature": signature_b64url,
+                "signedAt": signed_at_ms,
+                "nonce": nonce,
+                "_meta": {
+                    "clientId": client_id,
+                    "clientMode": client_mode,
+                    "platform": platform,
+                    "role": role,
+                    "scopes": scopes,
+                }
+            }
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to build device signature: {e}")
+            return None
 
     def _disconnect(self):
         """Close WebSocket connection."""
@@ -259,8 +406,17 @@ class OpenClawClient(BaseAIClient):
                         logger.debug(f"[{self.name}] Unsolicited response: {msg}")
 
                 elif msg.get("type") == "event":
-                    # Handle server events (chat updates, etc.)
-                    logger.debug(f"[{self.name}] Event: {msg.get('event')}")
+                    event_type = msg.get("event")
+                    payload = msg.get("payload", {})
+                    logger.debug(f"[{self.name}] Event: {event_type}")
+
+                    # Collect chat events for response retrieval
+                    if event_type == "chat":
+                        run_id = payload.get("runId")
+                        if run_id:
+                            with self._lock:
+                                self._chat_events[run_id] = payload
+                            logger.debug(f"[{self.name}] Chat event for runId={run_id}: state={payload.get('state')}")
 
             except websocket.WebSocketConnectionClosedException:
                 logger.warning(f"[{self.name}] Connection closed")
@@ -394,7 +550,7 @@ class OpenClawClient(BaseAIClient):
 
         # Build request parameters
         params = {
-            "sessionKey": f"agent:{self.agent_id}",
+            "sessionKey": f"agent:{self.agent_id}:default",
             "message": prompt,
             "idempotencyKey": str(uuid.uuid4()),
             "timeoutMs": min(15000, self.timeout * 1000) if is_health_check else self.timeout * 1000
@@ -404,9 +560,87 @@ class OpenClawClient(BaseAIClient):
             params["thinking"] = self.thinking
 
         try:
-            # Send via WebSocket
-            payload = self._send_request("chat.send", params)
-            return self._parse_response(payload, is_health_check)
+            # Send via WebSocket - chat.send returns an ack, not the actual reply
+            ack = self._send_request("chat.send", params)
+            run_id = ack.get("runId")
+            if not run_id:
+                return self._make_error_result(
+                    "TRANSIENT_SERVER",
+                    "NO_RUN_ID",
+                    "Gateway did not return a runId"
+                )
+
+            # Wait for the chat event with the actual agent response
+            logger.debug(f"[{self.name}] Waiting for chat event, runId={run_id}")
+            start_time = time.time()
+            final_event = None
+            while time.time() - start_time < self.timeout:
+                with self._lock:
+                    event = self._chat_events.get(run_id)
+                if event and event.get("state") in ("final", "error", "aborted"):
+                    final_event = event
+                    break
+                time.sleep(0.2)
+
+            if not final_event:
+                return self._make_error_result(
+                    "TRANSIENT_SERVER",
+                    "TIMEOUT",
+                    f"No chat event received for runId={run_id} within {self.timeout}s"
+                )
+
+            # Clean up
+            with self._lock:
+                self._chat_events.pop(run_id, None)
+
+            if final_event.get("state") == "error":
+                return self._make_error_result(
+                    "TRANSIENT_SERVER",
+                    "AGENT_ERROR",
+                    final_event.get("errorMessage", "Agent returned error state")
+                )
+
+            # Parse the actual response from the chat event
+            message_data = final_event.get("message", {})
+            content_parts = message_data.get("content", [])
+            texts = []
+            for part in content_parts:
+                if part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+
+            response_text = "".join(texts)
+
+            if not response_text.strip():
+                return self._make_error_result(
+                    "TRANSIENT_SERVER",
+                    "EMPTY_CONTENT",
+                    "Agent returned empty response text"
+                )
+
+            # Build OpenAI-compatible response
+            openai_response = {
+                "id": run_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": self._model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": response_text
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": self._extract_usage(final_event)
+            }
+
+            return {
+                "success": True,
+                "data": openai_response,
+                "error": None
+            }
 
         except TimeoutError:
             logger.warning(f"[{self.name}] Gateway request timed out")
@@ -528,11 +762,17 @@ class OpenClawClient(BaseAIClient):
         }
 
     def _extract_usage(self, result_data: Dict[str, Any]) -> Dict[str, int]:
-        """Extract token usage from OpenClaw response metadata."""
-        meta = result_data.get("meta", {})
-        agent_meta = meta.get("agentMeta", {})
-        usage = agent_meta.get("usage", {})
-        last_call = agent_meta.get("lastCallUsage", {})
+        """Extract token usage from OpenClaw response (chat event or legacy format)."""
+        # Try chat event format first (usage at top level)
+        usage = result_data.get("usage", {})
+        if not usage:
+            # Fallback to legacy nested format
+            meta = result_data.get("meta", {})
+            agent_meta = meta.get("agentMeta", {})
+            usage = agent_meta.get("usage", {})
+            last_call = agent_meta.get("lastCallUsage", {})
+        else:
+            last_call = usage
 
         prompt_tokens = last_call.get("input", usage.get("input", 0))
         completion_tokens = last_call.get("output", usage.get("output", 0))
