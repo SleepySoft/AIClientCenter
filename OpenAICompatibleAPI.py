@@ -604,6 +604,15 @@ def create_long_cat_client(token: Optional[str] = None, model: Optional[str] = N
     return client
 
 
+def create_mimo_client(token: Optional[str] = None, model: Optional[str] = None):
+    client = OpenAICompatibleAPI(
+        api_base_url='https://token-plan-cn.xiaomimimo.com/v1',
+        token=token or os.getenv("MIMO_API_KEY"),
+        default_model=model or 'mimo-v2.5-pro'
+    )
+    return client
+
+
 def create_modelscope_client(token: Optional[str] = None, model: Optional[str] = None):
     client = OpenAICompatibleAPI(
         api_base_url='https://api-inference.modelscope.cn/v1',
