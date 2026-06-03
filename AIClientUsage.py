@@ -14,7 +14,7 @@ sys.path.append(self_path)
 try:
     from ComplexConversation import MESSAGE
     from AIClientManagerBackend import AIDashboardService
-    from AIClientConfigExample import AI_CLIENTS, AI_CLIENT_LIMIT
+    from ai_client_config_example import AI_CLIENTS, AI_CLIENT_LIMIT
     from AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client
@@ -24,7 +24,7 @@ except ImportError as e:
 
     from .ComplexConversation import MESSAGE
     from .AIClientManagerBackend import AIDashboardService
-    from .AIClientConfigExample import AI_CLIENTS, AI_CLIENT_LIMIT
+    from .ai_client_config_example import AI_CLIENTS, AI_CLIENT_LIMIT
     from .AIClients import StandardOpenAIClient, SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
     from .AIClientManager import CLIENT_PRIORITY_EXPENSIVE, AIClientManager, CLIENT_PRIORITY_FREEBIE
     from .OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client

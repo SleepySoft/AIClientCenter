@@ -1,6 +1,6 @@
 # --------------------------------------------------------------------------------
 # Python is config. We don't need a json file and load it, analyze it.
-# Rename AIClientConfigExample.py to ai_client_config.py to enable this config.
+# Rename ai_client_config_example.py to ai_client_config.py to enable this config.
 # --------------------------------------------------------------------------------
 import os
 from typing import List, Dict
