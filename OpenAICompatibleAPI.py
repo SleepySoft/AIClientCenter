@@ -54,7 +54,7 @@ if aiohttp:
     ])
 RETRYABLE_ASYNC_EXCEPTIONS = tuple(_async_retry_exceptions)
 
-LLM_DEFAULT_TIMEOUT_S = 5 * 60
+LLM_DEFAULT_TIMEOUT_S = 3 * 60
 
 
 # --- Helper Function for Structured Error ---
@@ -394,7 +394,7 @@ class OpenAICompatibleAPI:
         # sock_read: 等待数据返回的时间，设长一点（如 300秒），生成慢不要紧
         timeout = aiohttp.ClientTimeout(
             total=LLM_DEFAULT_TIMEOUT_S,
-            sock_connect=5,  # <--- 关键：连接超时设短，快速失败
+            sock_connect=5,  # 关键：连接超时设短，快速失败
             sock_read=LLM_DEFAULT_TIMEOUT_S
         )
 
