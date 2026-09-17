@@ -204,3 +204,45 @@ AI_CLIENT_LIMIT = {
     'longcat_client': 2,
     'silicon flow proxy': 1,
 }
+
+
+# --------------------------------------------------------------------------------
+# Agent CLI (Harness) Clients —— 基于本机命令行 AI Agent 的客户端
+# --------------------------------------------------------------------------------
+# 适用于：API 服务不可用 / 余额查询失效时，改走本机已登录的 Agent CLI
+# （Codex / Kimi 等）进行分析。认证由 CLI 自身管理，无"余额"概念，
+# 请用 quota_config（用量配额）驱动健康度。
+#
+# 两种模式：
+#   MODE_STATELESS - 每次调用全新进程，完整 messages 序列化注入（模拟 AI Client）
+#   MODE_SESSION   - 沿 Agent 会话续接调用，利用服务端缓存降低 Token 消耗
+#                    （实测 codex 续接第二轮 cached_input_tokens 31872）
+#
+# 详见 AIClientCenter/doc/AgentCLIResearch.md
+#
+# 使用示例（取消注释并加入上面的 return 字典）：
+#
+# from AIClientCenter.AgentHarnessClients import (
+#     CodexCLIClient, KimiCLIClient, MODE_STATELESS, MODE_SESSION,
+# )
+#
+# codex_client = CodexCLIClient(
+#     name='Codex CLI Session',
+#     mode=MODE_SESSION,                # 或 MODE_STATELESS
+#     # model='gpt-5-codex',            # 不指定则用 CLI 默认模型
+#     work_dir=r'C:\D\code\IntelligenceIntegrationSystem',
+#     priority=CLIENT_PRIORITY_CONSUMABLES,
+#     group_id='agent_cli',
+#     quota_config={'period_days': 1, 'limits': {'total_tokens': 500000}},
+# )
+#
+# kimi_client = KimiCLIClient(
+#     name='Kimi CLI Stateless',
+#     mode=MODE_STATELESS,
+#     priority=CLIENT_PRIORITY_CONSUMABLES,
+#     group_id='agent_cli',
+#     quota_config={'period_days': 1, 'limits': {'total_tokens': 500000}},
+# )
+#
+# 注意：session 模式的客户端同一时刻只能处理一个会话序列，
+# 建议 group_id 独立并设置 AI_CLIENT_LIMIT['agent_cli'] = 1 控制并发。

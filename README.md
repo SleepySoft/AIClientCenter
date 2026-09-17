@@ -82,6 +82,14 @@ An AI client center that supports token and model rotation
 
 > Gemini客户端。由于本人账号限制，无法白嫖。
 
+[AgentHarnessClients.py](AgentHarnessClients.py)
+
+> 基于本机命令行 AI Agent（Codex CLI / Kimi CLI）的客户端实现。
+> 当 API 服务不可用或余额查询失效时，可走已登录的 Agent CLI 进行分析：
+> `stateless` 模式每次全新调用（模拟 AI Client），`session` 模式沿会话续接以利用缓存省 Token。
+> 各 Agent CLI 的非交互调用方式调研见 [doc/AgentCLIResearch.md](doc/AgentCLIResearch.md)，
+> 配置示例见 ai_client_config_example.py 末尾，冒烟测试见 TestAgentHarnessClients.py。
+
 
 ---------
 
