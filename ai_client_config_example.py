@@ -17,6 +17,9 @@ from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
 from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 from AIClientCenter.OpenClawClient import OpenClawClient
 from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
+from AIClientCenter.AgentHarnessClients import (
+    CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
+)
 
 
 def build_ai_clients() -> Dict[str, BaseAIClient]:
@@ -154,7 +157,7 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
     # --------------------------------------------------------
 
     gemini_api_1 = GoogleGeminiAdapter(
-        api_key='AIzaSyDQFb29QyRMTBpPAhoaLED23vu-mG0gb-k',
+        api_key=os.getenv('GEMINI_API_KEY', 'your-gemini-key'),
         model='gemini-2.5-flash',
         proxy='http://127.0.0.1:10809'
     )
@@ -166,10 +169,93 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         default_available=True
     )
 
+    # ========================================================================
+    # 预算策略配置示例
+    # ========================================================================
+    # 所有 Client 都可以设置 budget_policy；它只影响本地调度，绝不改变
+    # Client 的运行时状态。limits 可使用 total_tokens、request_count、
+    # prompt_tokens、completion_tokens 等由响应 usage 上报的数值字段。
+    # period_days 是本地计数窗口；0 表示不自动重置。
+    #
+    # 1) UNKNOWN（默认）：余额/套餐额度未知，正常参与调度；适合 CLI Harness。
+    #    budget_policy=BudgetPolicy(BudgetMode.UNKNOWN)
+    #
+    # 2) OBSERVED：只记录和展示用量，不影响调度；适合无法可靠查询余额的 API。
+    #    budget_policy=BudgetPolicy(BudgetMode.OBSERVED)
+    #
+    # 3) SOFT_LIMIT：达到本地限额后排在正常候选之后；所有其他 client 都不可用
+    #    时仍会使用。适合昂贵 API 或套餐型 Harness。
+    #    budget_policy=BudgetPolicy(
+    #        BudgetMode.SOFT_LIMIT,
+    #        limits={'total_tokens': 500_000}, period_days=1,
+    #        soft_limit_multiplier=0.1,
+    #    )
+    #
+    # 4) HARD_LIMIT：达到本地限额后不再分配新任务；适合明确的免费调用次数。
+    #    budget_policy=BudgetPolicy(
+    #        BudgetMode.HARD_LIMIT,
+    #        limits={'request_count': 495}, period_days=1,
+    #    )
+    #
+    # 5) minimums：余额低于阈值时阻断（只有余额确实可查询/维护时使用）。
+    #    budget_policy=BudgetPolicy(
+    #        BudgetMode.HARD_LIMIT, minimums={'balance': 1.0},
+    #    )
+
+    # ---------------- Agent CLI / Harness 配置 ----------------
+    # Harness 认证由本机 CLI 处理，运行前请先在终端完成对应 CLI 的登录。
+    # 默认 active_health_checks=False，避免定期 "OK" 探测消耗套餐。
+    # session 客户端只能串行使用；请给每个 session group 设置并发 1。
+
+    # A. Codex：无状态模式。每篇情报独立进程，推荐用于普通新闻分析。
+    # codex_stateless = CodexCLIClient(
+    #     name='Codex CLI Stateless',
+    #     mode=MODE_STATELESS,
+    #     work_dir=os.getcwd(),          # 或填写 IIS 项目绝对路径
+    #     priority=CLIENT_PRIORITY_CONSUMABLES,
+    #     group_id='codex_cli',
+    #     budget_policy=BudgetPolicy(BudgetMode.UNKNOWN),
+    # )
+
+    # B. Codex：session 模式。仅用于同一专题的连续推演，不能混用独立文章。
+    # codex_session = CodexCLIClient(
+    #     name='Codex CLI Session',
+    #     mode=MODE_SESSION,
+    #     work_dir=os.getcwd(),
+    #     priority=CLIENT_PRIORITY_CONSUMABLES,
+    #     group_id='codex_session',
+    #     budget_policy=BudgetPolicy(
+    #         BudgetMode.SOFT_LIMIT, limits={'total_tokens': 500_000}, period_days=1,
+    #     ),
+    # )
+
+    # C. Kimi：无状态模式。若 CLI 不上报 token，框架按字符数估算并作为本地观测。
+    # kimi_stateless = KimiCLIClient(
+    #     name='Kimi CLI Stateless',
+    #     mode=MODE_STATELESS,
+    #     priority=CLIENT_PRIORITY_CONSUMABLES,
+    #     group_id='kimi_cli',
+    #     budget_policy=BudgetPolicy(
+    #         BudgetMode.SOFT_LIMIT, limits={'request_count': 100}, period_days=1,
+    #     ),
+    # )
+
+    # D. GLM：当前没有 GLM CLI Harness adapter。若使用 Zhipu/GLM 的 API，
+    #    可按普通 StandardOpenAIClient/ZhipuSDKAdapter 配置并选择 OBSERVED、
+    #    SOFT_LIMIT 或 HARD_LIMIT。若将来存在稳定的非交互 GLM CLI，应新增
+    #    GLMCLIClient(AgentCLIClient) 后再在此处实例化，不能把 CLI 命令直接
+    #    填进 StandardOpenAIClient。
+
+    # E. 无余额 API 的观测模式示例：不因无法查询余额被调度器排除。
+    # unknown_balance_client = StandardOpenAIClient(
+    #     name='Unknown Balance API', openai_api=some_openai_api,
+    #     priority=CLIENT_PRIORITY_EXPENSIVE, group_id='unknown_api',
+    #     budget_policy=BudgetPolicy(BudgetMode.OBSERVED),
+    # )
+
     # -------------- OpenClaw client --------------
-    # - Communicates with OpenClaw agents via CLI
-    # - Useful for routing requests through OpenClaw's agent system
-    # - Supports timeout and error handling
+    # - 通过 OpenClaw Gateway 转发给外部 Agent；它不是 AgentCLIClient。
+    # - 它同样可以接收 budget_policy（取决于 OpenClawClient 构造函数版本）。
     # ------------------------------------------------
 
     # openclaw_client = OpenClawClient(
@@ -192,6 +278,10 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         'zhipu_client': zhipu_client,
         'longcat': longcat_client,
         'gemini': gemini_client_1,
+        # 'codex_stateless': codex_stateless,
+        # 'codex_session': codex_session,
+        # 'kimi_stateless': kimi_stateless,
+        # 'unknown_balance': unknown_balance_client,
         # 'openclaw': openclaw_client,
     }
 
@@ -204,48 +294,7 @@ AI_CLIENT_LIMIT = {
     'silicon flow': 2,
     'longcat_client': 2,
     'silicon flow proxy': 1,
+    # 'codex_cli': 1,       # 无状态也建议限制，避免同时占用多个套餐任务
+    # 'codex_session': 1,   # 必须为 1：同一 session 不可并行
+    # 'kimi_cli': 1,
 }
-
-
-# --------------------------------------------------------------------------------
-# Agent CLI (Harness) Clients —— 基于本机命令行 AI Agent 的客户端
-# --------------------------------------------------------------------------------
-# 适用于：API 服务不可用 / 余额查询失效时，改走本机已登录的 Agent CLI
-# （Codex / Kimi 等）进行分析。认证由 CLI 自身管理，无可靠"余额"概念；
-# 默认 unknown 预算策略会正常参与调度。若要控制本地花费，请使用 soft_limit
-# （降权、不阻断）或 hard_limit（明确达到本地上限后阻断）。
-#
-# 两种模式：
-#   MODE_STATELESS - 每次调用全新进程，完整 messages 序列化注入（模拟 AI Client）
-#   MODE_SESSION   - 沿 Agent 会话续接调用，利用服务端缓存降低 Token 消耗
-#                    （实测 codex 续接第二轮 cached_input_tokens 31872）
-#
-# 详见 AIClientCenter/doc/AgentCLIResearch.md
-#
-# 使用示例（取消注释并加入上面的 return 字典）：
-#
-# from AIClientCenter.AgentHarnessClients import (
-#     CodexCLIClient, KimiCLIClient, MODE_STATELESS, MODE_SESSION,
-# )
-#
-# codex_client = CodexCLIClient(
-#     name='Codex CLI Session',
-#     mode=MODE_SESSION,                # 或 MODE_STATELESS
-#     # model='gpt-5-codex',            # 不指定则用 CLI 默认模型
-#     work_dir=r'C:\D\code\IntelligenceIntegrationSystem',
-#     priority=CLIENT_PRIORITY_CONSUMABLES,
-#     group_id='agent_cli',
-#     budget_policy=BudgetPolicy(BudgetMode.SOFT_LIMIT, {'total_tokens': 500000}),
-#     active_health_checks=False,       # 默认值；避免定期探测消耗套餐
-# )
-#
-# kimi_client = KimiCLIClient(
-#     name='Kimi CLI Stateless',
-#     mode=MODE_STATELESS,
-#     priority=CLIENT_PRIORITY_CONSUMABLES,
-#     group_id='agent_cli',
-#     budget_policy=BudgetPolicy(BudgetMode.SOFT_LIMIT, {'total_tokens': 500000}),
-# )
-#
-# 注意：session 模式的客户端同一时刻只能处理一个会话序列，
-# 建议 group_id 独立并设置 AI_CLIENT_LIMIT['agent_cli'] = 1 控制并发。
