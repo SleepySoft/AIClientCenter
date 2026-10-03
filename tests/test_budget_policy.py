@@ -38,3 +38,10 @@ def test_invalid_or_missing_observations_do_not_turn_into_a_hard_block():
 
     assert policy.evaluate({"total_tokens": 100}).allowed is True
     assert policy.evaluate({}).allowed is True
+
+
+def test_minimum_balance_is_a_separate_low_watermark_rule():
+    policy = BudgetPolicy(BudgetMode.HARD_LIMIT, minimums={"balance": 1.5})
+
+    assert policy.evaluate({"balance": 1.6}).allowed is True
+    assert policy.evaluate({"balance": 1.5}).allowed is False

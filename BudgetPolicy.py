@@ -38,9 +38,11 @@ class BudgetPolicy:
 
     def __init__(self, mode: BudgetMode = BudgetMode.UNKNOWN,
                  limits: Optional[Dict[str, float]] = None,
+                 minimums: Optional[Dict[str, float]] = None,
                  soft_limit_multiplier: float = 0.1):
         self.mode = BudgetMode(mode)
         self.limits = dict(limits or {})
+        self.minimums = dict(minimums or {})
         self.soft_limit_multiplier = max(0.0, min(1.0, float(soft_limit_multiplier)))
 
     @classmethod
@@ -49,6 +51,7 @@ class BudgetPolicy:
         return cls(
             mode=config.get("mode", BudgetMode.UNKNOWN),
             limits=config.get("limits"),
+            minimums=config.get("minimums"),
             soft_limit_multiplier=config.get("soft_limit_multiplier", 0.1),
         )
 
@@ -77,4 +80,12 @@ class BudgetPolicy:
                 continue
             if limit >= 0 and current >= limit:
                 return key, current, limit
+        for key, raw_minimum in self.minimums.items():
+            try:
+                minimum = float(raw_minimum)
+                current = float(usage.get(key, minimum + 1))
+            except (TypeError, ValueError):
+                continue
+            if current <= minimum:
+                return key, current, minimum
         return None

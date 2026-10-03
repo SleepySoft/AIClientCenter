@@ -6,12 +6,14 @@ from typing import Dict, List, Optional, Any, Union
 try:
     from .SimpleRotator import SimpleRotator
     from .LimitMixins import ClientMetricsMixin
+    from .BudgetPolicy import BudgetPolicy
     from .AIServiceTokenRotator import RotatableClient
     from .OpenAICompatibleAPI import OpenAICompatibleAPI
     from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
 except ImportError:
     from SimpleRotator import SimpleRotator
     from LimitMixins import ClientMetricsMixin
+    from BudgetPolicy import BudgetPolicy
     from AIServiceTokenRotator import RotatableClient
     from OpenAICompatibleAPI import OpenAICompatibleAPI
     from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus
@@ -41,7 +43,8 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             default_available: bool = False,
             quota_config: dict = None,
             balance_config: dict = None,
-            state_file_path: Optional[str] = None
+            state_file_path: Optional[str] = None,
+            budget_policy: Optional[BudgetPolicy] = None,
     ):
         """
         Initialize the Standard Client.
@@ -67,7 +70,8 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             # Initialize ClientMetricsMixin
             quota_config=quota_config,
             balance_config=balance_config,
-            state_file_path=state_file_path
+            state_file_path=state_file_path,
+            budget_policy=budget_policy,
         )
 
         self.api = openai_api

@@ -5,6 +5,11 @@ import threading
 from typing import Dict, Any, List, Optional, Union
 from collections import Counter
 
+try:
+    from .BudgetPolicy import BudgetMode, BudgetPolicy
+except ImportError:
+    from BudgetPolicy import BudgetMode, BudgetPolicy
+
 # Constants for Metric Types
 METRIC_TYPE_USAGE = "USAGE_LIMIT"  # Logic: Healthy when current < target
 METRIC_TYPE_BALANCE = "BALANCE_THRESHOLD"  # Logic: Healthy when current > target
@@ -28,6 +33,7 @@ class ClientMetricsMixin:
                  quota_config: Optional[Dict[str, Any]] = None,
                  balance_config: Optional[Dict[str, float]] = None,
                  state_file_path: Optional[str] = None,
+                 budget_policy: Optional[BudgetPolicy] = None,
                  *args, **kwargs):
         """
         Initialize the metrics subsystem.
@@ -38,7 +44,7 @@ class ClientMetricsMixin:
             state_file_path: JSON path for persisting both usage stats and balance.
             *args, **kwargs: Passed to super() to maintain MRO chain.
         """
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, budget_policy=budget_policy, **kwargs)
 
         self.quota_config = quota_config or {}
         self.balance_config = balance_config or {}
@@ -58,6 +64,16 @@ class ClientMetricsMixin:
 
         if self.state_file_path:
             self._load_state()
+
+        # 兼容旧配置：原 quota/balance 均是硬性准入条件。新的 policy
+        # 把该判断从 health score 中独立出来，未知额度则保持默认 unknown。
+        if budget_policy is None and (self.quota_config or self.balance_config):
+            self.budget_policy = BudgetPolicy(
+                BudgetMode.HARD_LIMIT,
+                limits=self.quota_config.get('limits', {}),
+                minimums={"balance": self.balance_config['hard_threshold']}
+                if 'hard_threshold' in self.balance_config else {},
+            )
 
     def set_usage_constraints(self,
                               max_tokens: Optional[int] = None,
@@ -175,6 +191,15 @@ class ClientMetricsMixin:
     def get_usage_stats(self) -> Dict[str, Any]:
         with self._metrics_lock:
             return dict(self._lifetime_stats)
+
+    def get_budget_usage(self) -> Dict[str, Any]:
+        """返回可用于本地预算准入的周期用量和余额快照。"""
+        with self._metrics_lock:
+            if self.quota_config:
+                self._check_and_reset_period_unsafe()
+            usage = dict(self._periodic_stats)
+            usage['balance'] = self._balance
+            return usage
 
     def get_standardized_metrics(self) -> List[Dict[str, Any]]:
         """

@@ -345,7 +345,9 @@ class BaseAIClient(ABC):
         均以空数据交给默认 ``unknown`` 策略，不能因此排除 Client。
         """
         usage = {}
-        usage_getter = getattr(self, 'get_usage_stats', None)
+        usage_getter = getattr(self, 'get_budget_usage', None)
+        if not callable(usage_getter):
+            usage_getter = getattr(self, 'get_usage_stats', None)
         if callable(usage_getter):
             try:
                 usage = usage_getter() or {}
@@ -727,7 +729,7 @@ class AIClientManager:
         1) "Available" means ALL of the following:
            - Client is not UNAVAILABLE
            - Client is not in a disqualified ERROR state (error_count threshold)
-           - Client health score > 0 (calculate_health)
+           - Client budget policy admits the request (only explicit hard limits block)
            - Client is not busy and can be acquired (not _is_busy(), and _acquire() succeeds)
            - Group concurrency limit is not violated (unless swapping within the same group)
 
@@ -850,12 +852,14 @@ class AIClientManager:
         gid = getattr(client, 'group_id', None)
         client_status = client.get_status('status')
 
-        # Health checks
+        # Runtime state and explicit budget policy are independent gates.
         if client_status == ClientStatus.UNAVAILABLE:
             return None
         if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
             return None
-        if client.calculate_health() <= 0:
+        budget_decision = client.get_budget_decision()
+        if not budget_decision.allowed:
+            logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
             return None
 
         # If user already holds this client, keep it (even if request_change=True, we treat name as override)
@@ -897,8 +901,9 @@ class AIClientManager:
                                             current_client,
                                             current_group_usage
                                             ) -> Optional[BaseAIClient]:
-        # Iterate through clients (Priority: High -> Low)
-        for client in self.clients:
+        # Soft budget limits keep the client available but rank it behind normal candidates.
+        candidates = sorted(self.clients, key=self._client_scheduling_key)
+        for client in candidates:
             client_name = getattr(client, 'name', '')
             client_status = client.get_status('status')
             gid = getattr(client, 'group_id', None)
@@ -930,12 +935,9 @@ class AIClientManager:
             if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
                 continue
 
-            # Dynamic health check
-            if client.calculate_health() <= 0:
-                logger.warning(
-                    f"Skipping client {client_name}: health exhausted "
-                    f"(metrics={client.get_standardized_metrics()})"
-                )
+            budget_decision = client.get_budget_decision()
+            if not budget_decision.allowed:
+                logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
                 continue
 
             # --- FILTER: Group Concurrency Limits ---
@@ -983,6 +985,16 @@ class AIClientManager:
         # If target_client_name was set, it means that specific client is unavailable.
         # If request_change was True, it means no OTHER client is available.
         return None
+
+    @staticmethod
+    def _client_scheduling_key(client: BaseAIClient):
+        """预算软限制只影响候选排序，绝不伪装成运行时故障。"""
+        decision = client.get_budget_decision()
+        multiplier = max(0.0, min(1.0, decision.ranking_multiplier))
+        # 优先级数值越小越优先。软限额到达后施加足够大的本地惩罚，
+        # 但在它是唯一可用 Client 时仍会被选中。
+        penalty = (1.0 - multiplier) * 1000.0
+        return getattr(client, 'priority', CLIENT_PRIORITY_NORMAL) + penalty
 
     def release_client(self, client: BaseAIClient | str):
         """
