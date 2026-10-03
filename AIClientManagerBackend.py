@@ -1,6 +1,7 @@
 import time
 import logging
 import threading
+import uuid
 from enum import Enum
 from typing import Optional, Callable, Any
 from flask import Flask, Blueprint, jsonify, request, Response
@@ -53,6 +54,9 @@ FRONTEND_HTML = r"""
           </button>
           <button onclick="window.location.href='timeline'" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
             <i class="fa-solid fa-chart-gantt mr-1"></i> Timeline
+          </button>
+          <button onclick="window.location.href='playground'" class="px-4 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700 text-sm">
+            <i class="fa-solid fa-flask mr-1"></i> Manual Call
           </button>
         </div>
     </div>
@@ -363,6 +367,127 @@ FRONTEND_HTML = r"""
             timeAgo(ts) { if (!ts) return '-'; const d = (Date.now()/1000) - ts; if (d < 60) return parseInt(d) + 's ago'; if (d < 3600) return parseInt(d/60) + 'm ago'; return parseInt(d/3600) + 'h ago'; }
         }
     }).mount('#app');
+</script>
+</body>
+</html>
+"""
+
+
+FRONTEND_MANUAL_CALL_HTML = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Client Manual Call</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans">
+  <main class="max-w-5xl mx-auto p-4 md:p-8">
+    <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
+      <div>
+        <h1 class="text-2xl font-bold"><i class="fa-solid fa-flask text-indigo-600 mr-2"></i>手动调用 Client</h1>
+        <p class="text-sm text-slate-500 mt-1">调用会经过现有调度、并发与预算策略；请注意此操作可能消耗 API 或 Harness 套餐额度。</p>
+      </div>
+      <a href="./" class="px-3 py-2 bg-white border rounded shadow-sm hover:bg-slate-50 text-sm"><i class="fa-solid fa-arrow-left mr-1"></i>返回面板</a>
+    </header>
+
+    <div id="disabled" class="hidden mb-4 rounded border border-amber-300 bg-amber-50 p-4 text-amber-800 text-sm">
+      手动调用已禁用。请在创建 <code>AIDashboardService</code> 时显式设置 <code>enable_manual_calls=True</code>，并确保后台有访问控制。
+    </div>
+    <section id="form-card" class="bg-white rounded-xl shadow-sm border p-5 md:p-6">
+      <form id="call-form" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="block text-sm font-medium">Client
+            <select id="client-name" required class="mt-1 w-full border rounded px-3 py-2 bg-white"></select>
+          </label>
+          <label class="block text-sm font-medium">模型（可选，留空使用 Client 默认）
+            <input id="model" class="mt-1 w-full border rounded px-3 py-2" maxlength="200" placeholder="default">
+          </label>
+          <label class="block text-sm font-medium">Temperature
+            <input id="temperature" class="mt-1 w-full border rounded px-3 py-2" type="number" min="0" max="2" step="0.1" value="0">
+          </label>
+          <label class="block text-sm font-medium">最大输出 Token
+            <input id="max-tokens" class="mt-1 w-full border rounded px-3 py-2" type="number" min="1" max="16384" value="1024">
+          </label>
+        </div>
+        <label class="block text-sm font-medium">System Prompt（可选）
+          <textarea id="system-prompt" class="mt-1 w-full border rounded px-3 py-2 font-mono text-sm" rows="3" maxlength="20000" placeholder="例如：用中文、以 JSON 返回。"></textarea>
+        </label>
+        <label class="block text-sm font-medium">用户消息
+          <textarea id="prompt" required class="mt-1 w-full border rounded px-3 py-2 font-mono text-sm" rows="9" maxlength="50000" placeholder="输入要测试的内容"></textarea>
+        </label>
+        <div class="flex items-center gap-3">
+          <button id="submit" type="submit" class="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+            <i class="fa-solid fa-play mr-1"></i>调用
+          </button>
+          <span id="status" class="text-sm text-slate-500"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="mt-6 bg-white rounded-xl shadow-sm border overflow-hidden">
+      <div class="px-5 py-3 border-b bg-slate-50 font-medium">结果</div>
+      <pre id="result" class="p-5 min-h-48 overflow-auto whitespace-pre-wrap break-words text-sm font-mono text-slate-700">尚未调用。</pre>
+    </section>
+  </main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const result = $('result');
+  const status = $('status');
+  const submit = $('submit');
+
+  async function loadClients() {
+    const response = await fetch('api/manual-call/clients');
+    if (response.status === 403) {
+      $('disabled').classList.remove('hidden');
+      $('form-card').classList.add('hidden');
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    const select = $('client-name');
+    select.replaceChildren();
+    for (const client of data.clients || []) {
+      const option = document.createElement('option');
+      option.value = client.name;
+      option.textContent = `${client.name} — ${client.model || 'default'} [${client.status}]`;
+      select.appendChild(option);
+    }
+    if (!select.options.length) status.textContent = '没有已注册的 Client。';
+  }
+
+  $('call-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const prompt = $('prompt').value.trim();
+    if (!prompt) return;
+    submit.disabled = true;
+    status.textContent = '正在调用…';
+    result.textContent = '';
+    try {
+      const response = await fetch('api/manual-call', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          client_name: $('client-name').value,
+          model: $('model').value.trim() || null,
+          temperature: Number($('temperature').value),
+          max_tokens: Number($('max-tokens').value),
+          system_prompt: $('system-prompt').value,
+          prompt,
+        }),
+      });
+      const data = await response.json();
+      result.textContent = JSON.stringify(data, null, 2);
+      status.textContent = response.ok ? `完成，耗时 ${data.elapsed_seconds}s` : `失败：${data.error || response.statusText}`;
+    } catch (error) {
+      result.textContent = String(error);
+      status.textContent = '请求失败。';
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  loadClients().catch((error) => { status.textContent = `无法载入 Client：${error}`; });
 </script>
 </body>
 </html>
@@ -1393,8 +1518,10 @@ class AIDashboardService:
     Flask-compatible dashboard service for AI Client Manager.
     """
 
-    def __init__(self, manager: AIClientManager):
+    def __init__(self, manager: AIClientManager, enable_manual_calls: bool = False):
         self.manager = manager
+        # 手动调用会产生真实成本；嵌入业务服务时应配合认证包装器再显式开启。
+        self.enable_manual_calls = enable_manual_calls
         self._is_registered = False
 
     def _make_json_serializable(self, obj: Any) -> Any:
@@ -1431,6 +1558,112 @@ class AIDashboardService:
         def dashboard_view():
             """Serve the Vue.js Frontend"""
             return Response(FRONTEND_HTML, mimetype='text/html')
+
+        @bp.route('/playground', methods=['GET'])
+        @maybe_wrap
+        def manual_call_view():
+            """Serve the protected manual client invocation page."""
+            return Response(FRONTEND_MANUAL_CALL_HTML, mimetype='text/html')
+
+        def manual_calls_allowed():
+            if self.enable_manual_calls:
+                return None
+            return jsonify({
+                "error": "Manual client calls are disabled. "
+                         "Create AIDashboardService(..., enable_manual_calls=True) to enable them."
+            }), 403
+
+        @bp.route('/api/manual-call/clients', methods=['GET'])
+        @maybe_wrap
+        def manual_call_clients():
+            denied = manual_calls_allowed()
+            if denied:
+                return denied
+
+            clients = []
+            for client in self.manager.clients:
+                try:
+                    model = client.get_current_model()
+                except Exception:
+                    model = None
+                clients.append({
+                    "name": getattr(client, 'name', ''),
+                    "model": model,
+                    "status": self._make_json_serializable(client.get_status('status')),
+                    "budget": self._make_json_serializable(client.get_budget_decision().__dict__),
+                })
+            return jsonify({"clients": clients})
+
+        @bp.route('/api/manual-call', methods=['POST'])
+        @maybe_wrap
+        def manual_call():
+            """Perform one real call through the normal manager allocation path."""
+            denied = manual_calls_allowed()
+            if denied:
+                return denied
+
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "Expected a JSON request body."}), 400
+
+            client_name = str(data.get('client_name') or '').strip()
+            prompt = str(data.get('prompt') or '').strip()
+            system_prompt = str(data.get('system_prompt') or '').strip()
+            model = str(data.get('model') or '').strip() or None
+            if not client_name or not prompt:
+                return jsonify({"error": "client_name and prompt are required."}), 400
+            if len(prompt) > 50000 or len(system_prompt) > 20000:
+                return jsonify({"error": "Prompt exceeds the permitted size."}), 400
+            if not self.manager.get_client_by_name(client_name):
+                return jsonify({"error": "Client not found."}), 404
+
+            try:
+                temperature = float(data.get('temperature', 0.0))
+                max_tokens = int(data.get('max_tokens', 1024))
+            except (TypeError, ValueError):
+                return jsonify({"error": "temperature or max_tokens is invalid."}), 400
+            if not 0.0 <= temperature <= 2.0 or not 1 <= max_tokens <= 16384:
+                return jsonify({"error": "temperature must be 0..2 and max_tokens 1..16384."}), 400
+
+            dashboard_user = "[Dashboard Call] " + str(uuid.uuid4())
+            client = self.manager.get_available_client(
+                dashboard_user,
+                target_client_name=client_name,
+                allow_private=True,
+            )
+            if not client:
+                return jsonify({
+                    "error": "Client is currently unavailable, busy, blocked by budget, or group-limited."
+                }), 409
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            started = time.monotonic()
+            try:
+                response = client.chat(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                logger.exception("Manual dashboard call failed for %s", client_name)
+                response = {"error": "dashboard_call_exception", "message": str(exc)}
+            finally:
+                self.manager.release_client(dashboard_user)
+
+            elapsed = round(time.monotonic() - started, 3)
+            body = {
+                "client_name": client_name,
+                "elapsed_seconds": elapsed,
+                "response": self._make_json_serializable(response),
+            }
+            if isinstance(response, dict) and response.get('error'):
+                body["error"] = response.get('message') or response.get('error')
+                return jsonify(body), 502
+            return jsonify(body)
 
         @bp.route('/api/overview', methods=['GET'])
         @maybe_wrap
