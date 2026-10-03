@@ -1,5 +1,22 @@
 # Agent CLI 非交互调用方式调研
 
+## 2026-10-03 审计更新
+
+本文件保留 2026-09-17 的人工调研记录，便于追溯当时的 CLI 行为；其中的
+旧 Codex JSONL 事件名称和“quota_config 驱动健康度”的描述已经过时。
+
+- 当前正式实现只有 CodexCLIClient 与 KimiCLIClient，代码位于 AgentHarnessClients.py。
+- 当前本机验证的 Codex CLI 为 0.160.0。适配器解析 session_meta 与 event_msg
+  包装的 item_completed、token_count、task_complete 事件；应以适配器和
+  tests/test_harness_and_api_adapters.py 为准。
+- Harness 默认采用 unknown 预算策略，缺少余额信息不会被排除；如需本地控制，
+  使用 BudgetPolicy 的 soft_limit 或 hard_limit，而非把额度映射为 runtime health。
+- Claude Code、Gemini CLI、Qwen Code、OpenCode、Aider 在下文只是扩展调研，
+  不是当前已实现或已测试的 adapter。
+- 对独立启动、配置校验和手动调用页面，请参阅 README；文件状态请参阅 FileGuide.md。
+
+---
+
 > 调研日期：2026-09-17。目的：将命令行 AI Agent 包装为 AIClientCenter 的分析客户端，
 > 支持（1）模拟 AI Client 的单次调用、（2）沿上下文会话续接以利用缓存降低 Token 消耗。
 >

@@ -10,4 +10,8 @@ uvicorn
 jinja2
 
 zhipuai
-# google-generativeai
+
+# Optional adapters/tools. Install only when the corresponding client is enabled.
+# google-generativeai  # Google Gemini official SDK path (if used instead of HTTP adapter)
+# websocket-client     # OpenClawClient Gateway WebSocket adapter
+# PyQt5                # AiServiceBalanceQueryUI desktop balance checker

@@ -2,6 +2,8 @@ import aiohttp
 import asyncio
 import logging
 import traceback
+import argparse
+from pathlib import Path
 from typing import Dict, Any
 
 
@@ -361,19 +363,31 @@ def _format_result_to_string(result: Dict[str, Any]) -> str:
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def main():
-    with open('C:\D\Code\git\IntelligenceIntegrationSystem\siliconflow_keys.txt', 'rt') as f:
+def main(keys_file: str) -> int:
+    """按行读取 SiliconFlow Key 文件并打印余额；仅供人工运维使用。"""
+    with Path(keys_file).expanduser().open('rt', encoding='utf-8') as f:
+        count = 0
         while True:
             line = f.readline().strip()
             if not line:
                 break
             result = get_siliconflow_balance(line)
             print(_format_result_to_string(result))
+            count += 1
+    return count
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="批量查询 SiliconFlow API Key 余额。")
+    parser.add_argument("--keys-file", required=True,
+                        help="每行一个 API Key 的文本文件路径。")
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        args = parse_args()
+        print(f"已查询 {main(args.keys_file)} 个 Key。")
     except Exception as e:
         print(str(e))
         print(traceback.format_exc())

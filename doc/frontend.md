@@ -1,3 +1,18 @@
+# 历史前端说明（不适用于当前 AIClientCenter 后台）
+
+> 审计标记：2026-10-03。
+>
+> 本文件原文描述的是爬虫组、Anchor/List、Round、FLOW 等界面，不对应当前
+> AIClientCenter 的 dashboard、timeline 或 Manual Call 页面。为保留原有的人类
+> 设计说明，以下内容未删除；但请不要据此实现或判断 AIClientCenter 的行为。
+>
+> 当前 AIClientCenter 页面说明见 README 的“独立配置校验与手动对话页”，
+> 文件用途和历史状态见 FileGuide.md。
+
+---
+
+以下为保留的旧版界面说明：
+
 整个界面设计采用了“**左侧导航，右侧详情**”的经典布局，并在顶部设有全局控制。设计语言简洁，通过颜色和简短的标签来传达状态。
 
 ---

@@ -32,9 +32,9 @@ An AI client center that supports token and model rotation
 
 ## 快速运行及预览
 
-安装 [requirements.txt](requirements.txt) 后，
-运行 [AIClientUsage.py](AIClientUsage.py) ，
-并访问 [http://127.0.0.1:8000/](http://127.0.0.1:8000/) 查看管理页面。
+安装 [requirements.txt](requirements.txt) 后，推荐先运行独立 Launcher 校验配置，
+再访问本机管理页面。AIClientUsage.py 是会持续发起真实请求的历史负载演示，
+不应用作日常启动入口。
 
 ### 独立配置校验与手动对话页
 
@@ -61,7 +61,7 @@ An AI client center that supports token and model rotation
 
 [AIClientManager.py](AIClientManager.py)
 
-> 核心代码：BaseAIClient 接口的定义及 Client 的管理。
+> 核心代码：BaseAIClient 接口、Client 的运行时状态、预算准入和调度管理。
 
 [AIClientManagerBackend.py](AIClientManagerBackend.py)
 
@@ -73,7 +73,13 @@ An AI client center that supports token and model rotation
 
 [LimitMixins.py](LimitMixins.py)
 
-> 余额及用量统计的“混入”类。混入该类以支持用量和健康度统计。
+> 余额及用量统计的兼容 mixin。额度信息通过 BudgetPolicy 单独参与调度，
+> 不再等同于 Client 的运行时健康度。
+
+[BudgetPolicy.py](BudgetPolicy.py)
+
+> 本地预算策略：unknown、observed、soft_limit、hard_limit。适用于 API、
+> Agent CLI Harness 以及无法查询余额的服务。
 
 [AIServiceTokenRotator.py](AIServiceTokenRotator.py)
 
@@ -106,6 +112,16 @@ An AI client center that supports token and model rotation
 > `stateless` 模式每次全新调用（模拟 AI Client），`session` 模式沿会话续接以利用缓存省 Token。
 > 各 Agent CLI 的非交互调用方式调研见 [doc/AgentCLIResearch.md](doc/AgentCLIResearch.md)，
 > 配置示例见 ai_client_config_example.py 末尾，冒烟测试见 TestAgentHarnessClients.py。
+
+## 文件状态与历史代码
+
+完整文件索引、生产入口、手动/付费工具与历史原型的保留理由见
+[doc/FileGuide.md](doc/FileGuide.md)。特别注意：
+
+- AIClientCenterLauncher.py 是当前独立入口；
+- TestAgentHarnessClients.py 会真实消耗 Agent CLI 套餐；
+- AiServiceBalanceQueryUI.py 是可选 PyQt5 工具；
+- recycled/ 中是隔离的历史原型，不进入当前运行时导入图。
 
 
 ---------
