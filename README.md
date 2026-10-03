@@ -36,6 +36,23 @@ An AI client center that supports token and model rotation
 运行 [AIClientUsage.py](AIClientUsage.py) ，
 并访问 [http://127.0.0.1:8000/](http://127.0.0.1:8000/) 查看管理页面。
 
+### 独立配置校验与手动对话页
+
+推荐使用 [AIClientCenterLauncher.py](AIClientCenterLauncher.py) 代替负载演示脚本。
+它默认加载项目根目录的 _config/ai_client_config.py，启动时只验证配置、
+预算策略和本机 Harness CLI 路径，不会自动发送模型请求：
+
+    # 仅校验配置（不启动服务、不消耗模型额度）
+    python -m AIClientCenter.AIClientCenterLauncher --validate-only
+
+    # 启动仅本机可访问的管理与手动对话页
+    python -m AIClientCenter.AIClientCenterLauncher --port 8000
+
+启动后访问 http://127.0.0.1:8000/playground，选择已注册的 client 后可手动
+发送 system/user prompt。调用仍会经过 AIClientManager 的并发和预算策略，因而
+可能消耗 API 或 Harness 套餐额度。非本机监听必须显式加 --allow-remote，并自行
+提供访问控制；也可传入 --disable-manual-calls 禁用真实调用。
+
 ## 说明
 
 [AIClientUsage.py](AIClientUsage.py)
@@ -96,4 +113,3 @@ An AI client center that supports token and model rotation
 ## 其它
 
 各个平台的免费额度政策经常变，因此很可能出现不稳定或一段时间拒绝服务的情况。并且在使用时注意限制同一个平台的并发访问数量（AIClientManager.set_group_limit()）。
-
