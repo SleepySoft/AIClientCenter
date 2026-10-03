@@ -22,6 +22,18 @@ class SchedulingClient(BaseAIClient):
         raise AssertionError("scheduler tests must not invoke a client")
 
 
+class PassiveHealthClient(SchedulingClient):
+    active_health_checks = False
+
+    def __init__(self):
+        super().__init__("passive", 1)
+        self.probe_count = 0
+
+    def _test_and_update_status(self):
+        self.probe_count += 1
+        return True
+
+
 class MetricsClient(ClientMetricsMixin, SchedulingClient):
     def __init__(self, quota_config=None, balance_config=None):
         super().__init__(name="metrics", priority=1, quota_config=quota_config,
@@ -71,3 +83,14 @@ def test_legacy_balance_threshold_becomes_an_explicit_hard_budget_gate():
     client.update_balance(1.5)
 
     assert client.get_budget_decision().allowed is False
+
+
+def test_passive_harness_style_client_is_not_periodically_probed():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    client = PassiveHealthClient()
+    manager.register_client(client)
+
+    manager._check_client_health()
+
+    assert client.probe_count == 0
+    manager.stop_monitoring()

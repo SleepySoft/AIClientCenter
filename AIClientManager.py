@@ -1336,6 +1336,8 @@ class AIClientManager:
 
         with self._lock:
             for client in self.clients:
+                if not getattr(client, 'active_health_checks', True):
+                    continue
                 client_status = client.get_status('status')
 
                 # --- 关键修改 1: 使用最近的活动时间 ---

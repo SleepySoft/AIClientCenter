@@ -331,7 +331,14 @@ class OpenAICompatibleAPI:
                     message = f"Rate Limit Hit: {status}"
                     return _make_error_result("TRANSIENT_SERVER", error_code, message)
 
-                # 其他 4xx (400 Bad Request, 401 Unauthorized, 403 Forbidden)
+                # 认证/权限/资源错误 (401/403/404) -> 账号级问题，换 Prompt 也没用，
+                # 归类为 PERMANENT，上层会将 Client 标记为 UNAVAILABLE
+                if status in (401, 403, 404):
+                    error_code = f"HTTP_{status}"
+                    message = f"Auth/Resource Error: {status} ({response.text[:100]})"
+                    return _make_error_result("PERMANENT", error_code, message)
+
+                # 其他 4xx (如 400 内容违规/参数错误)
                 # 使用 "BAD_REQUEST" 类型，明确告知上层：别重试了，也没必要封禁 Client
                 error_code = f"HTTP_{status}"
                 # 截取一小段 error message 用于调试，但不依赖它做逻辑
@@ -461,6 +468,14 @@ class OpenAICompatibleAPI:
             if status in RETRYABLE_STATUS_CODES:
                 message = f"Transient Server Error (Async): {status} ({e.message})"
                 return _make_error_result("TRANSIENT_SERVER", error_code, message)
+            elif status in (401, 403, 404):
+                # 认证/权限/资源错误 -> 账号级问题，上层会将 Client 标记为 UNAVAILABLE
+                message = f"Auth/Resource Error (Async): {status} ({e.message})"
+                return _make_error_result("PERMANENT", error_code, message)
+            elif 400 <= status < 500:
+                # 请求内容/参数错误 -> Client 仍健康，上层不应重试
+                message = f"Client Side Error (Async): {status} ({e.message})"
+                return _make_error_result("BAD_REQUEST", error_code, message)
             else:
                 message = f"Permanent Error (Async): {status} ({e.message})"
                 return _make_error_result("PERMANENT", error_code, message)

@@ -18,7 +18,8 @@ Agent Harness Clients
    并重发完整上下文（自愈）。
 
 注意：
-- 此类客户端没有"余额"概念，请使用 quota_config（用量配额）驱动健康度。
+- 此类客户端没有可验证的余额概念，默认使用 unknown 预算策略；可选地传入
+  BudgetPolicy 配置本地 soft/hard 限额，但额度状态不参与运行时健康度。
 - Windows 下统一通过 stdin 传 Prompt，避免命令行长度限制与引号转义问题。
 - .cmd/.bat 封装（如 npm 全局安装的 codex）自动通过 cmd.exe /c 调用。
 """
@@ -38,12 +39,14 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from .APIResult import APIResult
     from .LimitMixins import ClientMetricsMixin
+    from .BudgetPolicy import BudgetPolicy
     from .AIClientManager import (
         BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
     )
 except ImportError:
     from APIResult import APIResult
     from LimitMixins import ClientMetricsMixin
+    from BudgetPolicy import BudgetPolicy
     from AIClientManager import (
         BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
     )
@@ -103,6 +106,8 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
             quota_config: Optional[Dict[str, Any]] = None,
             balance_config: Optional[Dict[str, float]] = None,
             state_file_path: Optional[str] = None,
+            budget_policy: Optional[BudgetPolicy] = None,
+            active_health_checks: bool = False,
             extra_env: Optional[Dict[str, str]] = None,
     ):
         super().__init__(
@@ -114,6 +119,7 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
             quota_config=quota_config,
             balance_config=balance_config,
             state_file_path=state_file_path,
+            budget_policy=budget_policy,
         )
 
         if mode == MODE_SESSION and not self.SUPPORTS_SESSION:
@@ -127,6 +133,8 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
         self.work_dir = work_dir or os.getcwd()
         self.mode = mode
         self.timeout = timeout
+        # Harness 自测本身会消耗套餐额度，默认仅靠真实请求和人工检查观测状态。
+        self.active_health_checks = active_health_checks
         self.extra_env = dict(extra_env or {})
 
         # 会话状态（session 模式）
@@ -412,9 +420,9 @@ class CodexCLIClient(AgentCLIClient):
         注意：resume 子命令不支持 -s/--sandbox 与 -C/--cd，会话会沿用首次调用时的配置。
 
     事件流（--json，JSONL）：
-        thread.started  -> thread_id（会话 ID）
-        item.completed  -> type=agent_message 时为最终文本
-        turn.completed  -> usage {input_tokens, cached_input_tokens, output_tokens, ...}
+        session_meta -> payload.session_id（会话 ID）
+        event_msg    -> payload.type=item_completed 时的 AgentMessage 文本
+        event_msg    -> payload.type=token_count 时的 token 用量
     """
 
     CLI_PROVIDER = 'codex'
@@ -467,14 +475,24 @@ class CodexCLIClient(AgentCLIClient):
                 continue
 
             etype = event.get('type')
-            if etype == 'thread.started':
-                session_id = event.get('thread_id') or session_id
-            elif etype == 'item.completed':
-                item = event.get('item') or {}
-                if item.get('type') == 'agent_message' and item.get('text'):
-                    last_agent_text = item['text']
-            elif etype == 'turn.completed':
-                u = event.get('usage') or {}
+            payload = event.get('payload') or {}
+            if etype == 'session_meta':
+                session_id = payload.get('session_id') or payload.get('id') or session_id
+            elif etype == 'event_msg' and payload.get('type') == 'item_completed':
+                item = payload.get('item') or {}
+                if item.get('type') in ('AgentMessage', 'agent_message'):
+                    last_agent_text = item.get('text')
+                    if not last_agent_text:
+                        last_agent_text = ''.join(
+                            str(part.get('text', ''))
+                            for part in item.get('content') or []
+                            if isinstance(part, dict)
+                        )
+                if last_agent_text:
+                    last_agent_text = last_agent_text.strip()
+            elif etype == 'event_msg' and payload.get('type') == 'token_count':
+                info = payload.get('info') or {}
+                u = info.get('last_token_usage') or info.get('total_token_usage') or {}
                 if u:
                     usage = {
                         'prompt_tokens': u.get('input_tokens', 0),
@@ -482,6 +500,8 @@ class CodexCLIClient(AgentCLIClient):
                         'total_tokens': u.get('input_tokens', 0) + u.get('output_tokens', 0),
                         'cached_input_tokens': u.get('cached_input_tokens', 0),
                     }
+            elif etype == 'event_msg' and payload.get('type') == 'task_complete':
+                last_agent_text = payload.get('last_agent_message') or last_agent_text
 
         # 最终文本优先取 -o 输出文件
         text = ''
@@ -498,6 +518,41 @@ class CodexCLIClient(AgentCLIClient):
 
     def _classify_error(self, exit_code: Optional[int], stdout: str, stderr: str) -> Dict[str, Any]:
         blob = f'{stdout}\n{stderr}'.lower()
+
+        # Parse Codex JSONL errors first. Request IDs may contain 401.
+        for line in stdout.splitlines():
+            if not line.startswith('{'):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            payload = event.get('payload') or {}
+            if payload.get('type') != 'task_complete' or not isinstance(payload.get('error'), dict):
+                continue
+
+            raw_message = str(payload['error'].get('message', ''))
+            try:
+                detail = json.loads(raw_message)
+            except (json.JSONDecodeError, TypeError):
+                detail = {}
+            if not isinstance(detail, dict):
+                detail = {}
+
+            if isinstance(detail.get('error'), dict):
+                detail = detail['error']
+
+            code = detail.get('code') or payload['error'].get('code') or 'CLI_ERROR'
+            error_type = detail.get('type') or payload['error'].get('type') or ''
+            message = detail.get('message') or raw_message
+            if error_type == 'BadRequest' or code == 'InvalidParameter':
+                return {
+                    'type': 'BAD_REQUEST',
+                    'code': 'HTTP_400',
+                    'message': f'{message} (code={code})',
+                }
+
         if exit_code is not None and ('no session' in blob or 'not found' in blob) and 'resume' in blob:
             # 会话丢失：标记为瞬时错误，上层 _chat_completion_sync 会自动重建会话重试
             return {'type': 'TRANSIENT_SERVER', 'code': 'SESSION_LOST',

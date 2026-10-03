@@ -16,6 +16,7 @@ from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create
 from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
 from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
 from AIClientCenter.OpenClawClient import OpenClawClient
+from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
 
 
 def build_ai_clients() -> Dict[str, BaseAIClient]:
@@ -210,8 +211,9 @@ AI_CLIENT_LIMIT = {
 # Agent CLI (Harness) Clients —— 基于本机命令行 AI Agent 的客户端
 # --------------------------------------------------------------------------------
 # 适用于：API 服务不可用 / 余额查询失效时，改走本机已登录的 Agent CLI
-# （Codex / Kimi 等）进行分析。认证由 CLI 自身管理，无"余额"概念，
-# 请用 quota_config（用量配额）驱动健康度。
+# （Codex / Kimi 等）进行分析。认证由 CLI 自身管理，无可靠"余额"概念；
+# 默认 unknown 预算策略会正常参与调度。若要控制本地花费，请使用 soft_limit
+# （降权、不阻断）或 hard_limit（明确达到本地上限后阻断）。
 #
 # 两种模式：
 #   MODE_STATELESS - 每次调用全新进程，完整 messages 序列化注入（模拟 AI Client）
@@ -233,7 +235,8 @@ AI_CLIENT_LIMIT = {
 #     work_dir=r'C:\D\code\IntelligenceIntegrationSystem',
 #     priority=CLIENT_PRIORITY_CONSUMABLES,
 #     group_id='agent_cli',
-#     quota_config={'period_days': 1, 'limits': {'total_tokens': 500000}},
+#     budget_policy=BudgetPolicy(BudgetMode.SOFT_LIMIT, {'total_tokens': 500000}),
+#     active_health_checks=False,       # 默认值；避免定期探测消耗套餐
 # )
 #
 # kimi_client = KimiCLIClient(
@@ -241,7 +244,7 @@ AI_CLIENT_LIMIT = {
 #     mode=MODE_STATELESS,
 #     priority=CLIENT_PRIORITY_CONSUMABLES,
 #     group_id='agent_cli',
-#     quota_config={'period_days': 1, 'limits': {'total_tokens': 500000}},
+#     budget_policy=BudgetPolicy(BudgetMode.SOFT_LIMIT, {'total_tokens': 500000}),
 # )
 #
 # 注意：session 模式的客户端同一时刻只能处理一个会话序列，
