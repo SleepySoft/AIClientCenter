@@ -76,6 +76,7 @@ def test_legacy_metrics_quota_becomes_an_explicit_hard_budget_gate():
     client.record_usage({"request_count": 1})
 
     assert client.get_budget_decision().allowed is False
+    assert client.calculate_health() == 100.0
 
 
 def test_legacy_balance_threshold_becomes_an_explicit_hard_budget_gate():
@@ -93,4 +94,28 @@ def test_passive_harness_style_client_is_not_periodically_probed():
     manager._check_client_health()
 
     assert client.probe_count == 0
+    manager.stop_monitoring()
+
+
+def test_client_stats_expose_budget_separately_from_runtime_health():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    client = MetricsClient(quota_config={"limits": {"request_count": 0}})
+    manager.register_client(client)
+
+    details = manager.get_client_stats()["clients"][0]
+
+    assert details["state"]["health_score"] == 100.0
+    assert details["budget"]["mode"] == "hard_limit"
+    assert details["budget"]["admitted"] is False
+    manager.stop_monitoring()
+
+
+def test_explicit_client_name_returns_that_client_without_falling_back():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    default = SchedulingClient("default", 0)
+    named = SchedulingClient("named", 50)
+    manager.register_client(default)
+    manager.register_client(named)
+
+    assert manager.get_available_client("user", target_client_name="named") is named
     manager.stop_monitoring()

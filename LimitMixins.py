@@ -232,43 +232,13 @@ class ClientMetricsMixin:
 
     def calculate_health(self) -> float:
         """
-        Calculates health score (0-100) based on the worst-performing metric.
+        兼容旧界面的运行态健康分数。
+
+        配额和余额已由 BudgetPolicy 单独表达，不能再作为 Client 运行健康度：
+        未知额度的 Harness 与可观测但不精确的 API 都应保持可执行。
+        调度器请使用 ``get_budget_decision()``，管理页请读取 ``budget`` 字段。
         """
-        metrics = self.get_standardized_metrics()
-        if not metrics:
-            return 100.0
-
-        lowest_score = 100.0
-
-        for m in metrics:
-            score = 100.0
-            current = float(m['current'])
-            target = float(m['target'])
-
-            if m['type'] == METRIC_TYPE_USAGE:
-                # Health drops as usage approaches limit
-                if target > 0:
-                    if current >= target:
-                        score = 0.0
-                    else:
-                        score = 100.0 * (target - current) / target
-                else:
-                    score = 0.0 if current > 0 else 100.0
-
-            elif m['type'] == METRIC_TYPE_BALANCE:
-                # Health drops as balance approaches threshold
-                if current <= target:
-                    score = 0.0
-                else:
-                    # Dynamic buffer: max(target, 10.0) ensures we don't divide by zero
-                    # and provides a smooth slope for low-balance warnings.
-                    safe_buffer = max(target, 10.0)
-                    score = min(100.0, 100.0 * (current - target) / safe_buffer)
-
-            if score < lowest_score:
-                lowest_score = score
-
-        return round(lowest_score, 2)
+        return 100.0
 
     def increase_quota(self, additional_amount: int, metric_key: Optional[str] = None):
         """

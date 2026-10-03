@@ -835,7 +835,8 @@ class AIClientManager:
                     current_group_usage[gid] = current_group_usage.get(gid, 0) + 1
 
             if target_client_name:
-                self._get_available_client_by_name(user_name, target_client_name, current_client, current_group_usage)
+                return self._get_available_client_by_name(
+                    user_name, target_client_name, current_client, current_group_usage)
             return self._get_available_client_by_conditions(user_name, request_change, target_group_id, allow_private, current_client, current_group_usage)
 
     def _get_available_client_by_name(self,
@@ -1046,6 +1047,8 @@ class AIClientManager:
             for client in self.clients:
                 # --- Extract Data ---
                 health_score = client.calculate_health() if hasattr(client, 'calculate_health') else 100
+                budget_decision = client.get_budget_decision()
+                budget_policy = getattr(client, 'budget_policy', None)
                 metrics_detail = client.get_standardized_metrics() if hasattr(client,
                                                                               'get_standardized_metrics') else {}
 
@@ -1084,6 +1087,12 @@ class AIClientManager:
                         "health_score": health_score,
                         "last_active_ts": raw_status.get('status_last_updated', 0.0),
                     },
+                    "budget": {
+                        "mode": getattr(getattr(budget_policy, 'mode', None), 'value', 'unknown'),
+                        "admitted": budget_decision.allowed,
+                        "ranking_multiplier": budget_decision.ranking_multiplier,
+                        "reason": budget_decision.reason,
+                    },
                     "allocation": {
                         "held_by": allocation['user'] if allocation else None,
                         "held_since": allocation['start_time'] if allocation else None,
@@ -1100,11 +1109,11 @@ class AIClientManager:
                     "metrics": metrics_detail  # Token limits, RPM, etc.
                 })
 
-            # Sort: 1. By Priority (asc), 2. By Busy Status (busy first), 3. By Health (desc)
+            # Sort: 1. By Priority (asc), 2. By Busy Status (busy first).
+            # Budget details are exposed separately and do not masquerade as runtime health.
             client_details.sort(key=lambda x: (
                 x['meta']['priority'],
                 not x['state']['is_busy'],
-                -x['state']['health_score']
             ))
 
             return {
