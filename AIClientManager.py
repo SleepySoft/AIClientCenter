@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List
 
 from AIClientCenter.APIResult import APIResult
 from AIClientCenter.ClientStateSQLiteLogger import ClientStateSQLiteLogger
+from AIClientCenter.BudgetPolicy import BudgetDecision, BudgetPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,8 @@ class BaseAIClient(ABC):
                  api_token: str,
                  priority: int = CLIENT_PRIORITY_NORMAL,
                  group_id: str = "default",
-                 visibility: ClientVisibility = ClientVisibility.PUBLIC):
+                 visibility: ClientVisibility = ClientVisibility.PUBLIC,
+                 budget_policy: Optional[BudgetPolicy] = None):
         """
         Initialize AI client with token and priority.
 
@@ -97,6 +99,8 @@ class BaseAIClient(ABC):
         self.priority = priority
         self.group_id = group_id
         self.visibility = visibility
+        # 预算是调度附加信息，不是 Client 的可执行状态。默认未知额度且不阻断。
+        self.budget_policy = budget_policy or BudgetPolicy()
 
         self.event_sink: Optional[ClientStateSQLiteLogger] = None
 
@@ -138,7 +142,7 @@ class BaseAIClient(ABC):
         """
 
         with self._lock:
-            if self._status['status'] == ClientStatus.UNAVAILABLE:
+            if self._status['status'] == ClientStatus.UNAVAILABLE and not is_health_check:
                 return {'error': 'client_unavailable', 'message': 'Client is marked as unavailable.'}
             if self._status['in_use']:
                 return {'error': 'client_busy', 'message': 'Client is busy (in use).'}
@@ -334,6 +338,21 @@ class BaseAIClient(ABC):
         """
         return []
 
+    def get_budget_decision(self) -> BudgetDecision:
+        """返回本地预算策略的准入判断。
+
+        用量统计是可选能力：没有 mixin、没有余额接口或 Harness 未上报 usage 时，
+        均以空数据交给默认 ``unknown`` 策略，不能因此排除 Client。
+        """
+        usage = {}
+        usage_getter = getattr(self, 'get_usage_stats', None)
+        if callable(usage_getter):
+            try:
+                usage = usage_getter() or {}
+            except Exception:
+                usage = {}
+        return self.budget_policy.evaluate(usage)
+
     # ---------------------------------------- Not for user ----------------------------------------
 
     def set_event_sink(self, sink_callable):
@@ -345,7 +364,7 @@ class BaseAIClient(ABC):
         with self._lock:
             return self._status['in_use']
 
-    def _acquire(self) -> bool:
+    def _acquire(self, force: bool = False) -> bool:
         """
         Attempt to acquire the client for use.
 
@@ -353,7 +372,9 @@ class BaseAIClient(ABC):
             bool: True if acquired successfully
         """
         with self._lock:
-            if self._status['acquired'] or self._status['status'] == ClientStatus.UNAVAILABLE:
+            if self._status['acquired']:
+                return False
+            if not force and self._status['status'] == ClientStatus.UNAVAILABLE:
                 return False
 
             self._status['acquired'] = True
@@ -381,7 +402,8 @@ class BaseAIClient(ABC):
             # chat() internally handles status switching based on APIResult
             result = self.chat(
                 messages=[{"role": "user", "content": self.test_prompt}],
-                max_tokens=100
+                max_tokens=100,
+                is_health_check=True
             )
 
             # chat() returns a final response dictionary
@@ -482,6 +504,13 @@ class BaseAIClient(ABC):
                 self._update_client_status(ClientStatus.UNAVAILABLE)
                 self._increase_error_count()  # 只有 Client 真的出错才计数
                 logger.error(f"Permanent API Error ({error_code}): {message}")
+
+        elif error_type == "BAD_REQUEST":
+            # 请求内容/参数错误 (如 400 敏感词、JSON 结构错误)
+            # 动作: Client 是健康的，状态不变、错误计数不变；但换 Client 重试无意义，标记 fatal
+            error_category = 'fatal'
+            logger.error(
+                f"Input/Param Error ({error_code}). Client {self.name} remains active. Message: {message[:100]}...")
 
         elif error_type in ["TRANSIENT_SERVER", "TRANSIENT_NETWORK"]:
             # 瞬时错误 (5xx, Network)
@@ -903,6 +932,10 @@ class AIClientManager:
 
             # Dynamic health check
             if client.calculate_health() <= 0:
+                logger.warning(
+                    f"Skipping client {client_name}: health exhausted "
+                    f"(metrics={client.get_standardized_metrics()})"
+                )
                 continue
 
             # --- FILTER: Group Concurrency Limits ---
@@ -916,7 +949,7 @@ class AIClientManager:
                 current_count = current_group_usage.get(gid, 0)
 
                 if current_count >= limit:
-                    logger.debug(
+                    logger.warning(
                         f"Skipping client {client_name}: Group '{gid}' limit reached ({current_count}/{limit})")
                     continue
 
@@ -1092,7 +1125,7 @@ class AIClientManager:
 
         logger.info(f"Manual check triggered for {client_name}")
         # 尝试获取锁并执行检查
-        if client._acquire():
+        if client._acquire(force=True):
             try:
                 # 注册临时用户
                 self._set_test_user(client)
@@ -1333,7 +1366,7 @@ class AIClientManager:
             logger.debug(f'Checking connectivity for {client_name}...')
 
             # This method usually pings the API or checks simple connectivity
-            if client._acquire():
+            if client._acquire(force=True):
                 try:
                     # 标记为系统正在使用，让 Dashboard 能显示 "[System Check] ..."
                     self._set_test_user(client)
