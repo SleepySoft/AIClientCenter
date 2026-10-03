@@ -39,10 +39,12 @@ class BudgetPolicy:
     def __init__(self, mode: BudgetMode = BudgetMode.UNKNOWN,
                  limits: Optional[Dict[str, float]] = None,
                  minimums: Optional[Dict[str, float]] = None,
+                 period_days: int = 30,
                  soft_limit_multiplier: float = 0.1):
         self.mode = BudgetMode(mode)
         self.limits = dict(limits or {})
         self.minimums = dict(minimums or {})
+        self.period_days = max(0, int(period_days))
         self.soft_limit_multiplier = max(0.0, min(1.0, float(soft_limit_multiplier)))
 
     @classmethod
@@ -52,6 +54,7 @@ class BudgetPolicy:
             mode=config.get("mode", BudgetMode.UNKNOWN),
             limits=config.get("limits"),
             minimums=config.get("minimums"),
+            period_days=config.get("period_days", 30),
             soft_limit_multiplier=config.get("soft_limit_multiplier", 0.1),
         )
 

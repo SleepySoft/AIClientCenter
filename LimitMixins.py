@@ -73,6 +73,7 @@ class ClientMetricsMixin:
                 limits=self.quota_config.get('limits', {}),
                 minimums={"balance": self.balance_config['hard_threshold']}
                 if 'hard_threshold' in self.balance_config else {},
+                period_days=self.quota_config.get('period_days', 30),
             )
 
     def set_usage_constraints(self,
@@ -106,6 +107,14 @@ class ClientMetricsMixin:
                 self.balance_config = {'hard_threshold': min_balance}
             else:
                 self.balance_config = {}
+
+            self.budget_policy = BudgetPolicy(
+                BudgetMode.HARD_LIMIT,
+                limits=self.quota_config.get('limits', {}),
+                minimums={"balance": self.balance_config['hard_threshold']}
+                if 'hard_threshold' in self.balance_config else {},
+                period_days=self.quota_config.get('period_days', period_days),
+            )
 
             # 3. Persist configuration changes
             if self.state_file_path:
@@ -156,8 +165,9 @@ class ClientMetricsMixin:
             self._lifetime_stats.update(increment)
             self._lifetime_stats['last_update'] = time.time()
 
-            # 2. Update periodic stats if quota is active (Persisted)
-            if self.quota_config:
+            # 2. 对任何有本地 token/request 预算的策略维护周期计数。
+            # soft_limit 不能只配置 policy 而不配置旧 quota_config，否则永远不会降权。
+            if self._has_periodic_budget_unsafe():
                 self._check_and_reset_period_unsafe()
                 self._periodic_stats.update(increment)
                 self._save_state_unsafe()
@@ -195,7 +205,7 @@ class ClientMetricsMixin:
     def get_budget_usage(self) -> Dict[str, Any]:
         """返回可用于本地预算准入的周期用量和余额快照。"""
         with self._metrics_lock:
-            if self.quota_config:
+            if self._has_periodic_budget_unsafe():
                 self._check_and_reset_period_unsafe()
             usage = dict(self._periodic_stats)
             usage['balance'] = self._balance
@@ -278,13 +288,21 @@ class ClientMetricsMixin:
 
     def _check_and_reset_period_unsafe(self):
         """Internal: Checks if period elapsed and resets USAGE stats only."""
-        period_days = self.quota_config.get('period_days', 30)
+        period_days = self.quota_config.get(
+            'period_days', getattr(self.budget_policy, 'period_days', 30))
         if period_days <= 0: return
 
         if time.time() - self._last_reset_time >= period_days * 86400:
             self._periodic_stats.clear()  # Reset usage
             self._last_reset_time = time.time()
             # Note: Balance is NOT reset here.
+
+    def _has_periodic_budget_unsafe(self) -> bool:
+        """Whether observed request/token usage must be retained for a local budget policy."""
+        if self.quota_config:
+            return True
+        policy = self.budget_policy
+        return policy.mode in (BudgetMode.SOFT_LIMIT, BudgetMode.HARD_LIMIT) and bool(policy.limits)
 
     def _save_state_unsafe(self):
         """Internal: Persists both periodic stats and balance to disk."""

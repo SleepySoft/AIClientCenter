@@ -35,9 +35,9 @@ class PassiveHealthClient(SchedulingClient):
 
 
 class MetricsClient(ClientMetricsMixin, SchedulingClient):
-    def __init__(self, quota_config=None, balance_config=None):
+    def __init__(self, quota_config=None, balance_config=None, budget_policy=None):
         super().__init__(name="metrics", priority=1, quota_config=quota_config,
-                         balance_config=balance_config)
+                         balance_config=balance_config, budget_policy=budget_policy)
 
 
 def test_hard_budget_limit_blocks_client_and_allows_fallback():
@@ -84,6 +84,18 @@ def test_legacy_balance_threshold_becomes_an_explicit_hard_budget_gate():
     client.update_balance(1.5)
 
     assert client.get_budget_decision().allowed is False
+
+
+def test_explicit_soft_policy_tracks_usage_without_legacy_quota_config():
+    client = MetricsClient(budget_policy=BudgetPolicy(
+        BudgetMode.SOFT_LIMIT, {"request_count": 1}, period_days=1,
+    ))
+    client.record_usage({"request_count": 1})
+
+    decision = client.get_budget_decision()
+
+    assert decision.allowed is True
+    assert decision.ranking_multiplier == 0.1
 
 
 def test_passive_harness_style_client_is_not_periodically_probed():
