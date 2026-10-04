@@ -9,8 +9,8 @@
 | 任务 | 文件或命令 | 说明 |
 | --- | --- | --- |
 | 校验并启动独立后台 | `python -m AIClientCenter`（`cli/launcher.py`） | 当前推荐入口。默认只监听本机，手动调用不会在启动阶段自动执行。 |
-| 在 IIS 中使用 | IntelligenceHubStartup.py（父项目） | 由 IIS 读取 _config/ai_client_config.py，并挂载受登录保护的后台。 |
-| 配置 client | config/example.py | 可复制到父项目 _config/ai_client_config.py；包含 API、预算、Harness 示例。 |
+| 在 IIS 中使用 | IntelligenceHubStartup.py（父项目） | IIS 仍读取父项目 `_config/ai_client_config.py`，并挂载受登录保护的后台。 |
+| 独立配置 client | config/config.py | 独立入口优先读取此本机文件；不存在时回退 config/example.py 并提示复制。 |
 | 自动化回归 | tests/ | 离线 pytest 测试；不调用真实 API 或 Agent CLI。 |
 | 人工真实 Harness 冒烟 | tests/manual_agent_harness.py | 会消耗 Codex/Kimi 套餐，仅在需要验证本机 CLI 时运行。 |
 

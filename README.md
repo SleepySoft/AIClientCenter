@@ -38,8 +38,11 @@ An AI client center that supports token and model rotation
 ### 独立配置校验与手动对话页
 
 推荐使用 [cli/launcher.py](cli/launcher.py) 代替负载演示脚本。
-它默认加载项目根目录的 _config/ai_client_config.py，启动时只验证配置、
-预算策略和本机 Harness CLI 路径，不会自动发送模型请求：
+它默认加载本模块的 `config/config.py`，启动时只验证配置、预算策略和本机
+Harness CLI 路径，不会自动发送模型请求。首次找不到该文件时，会使用
+`config/example.py` 并显示复制命令：
+
+    Copy-Item AIClientCenter/config/example.py AIClientCenter/config/config.py
 
     # 仅校验配置（不启动服务、不消耗模型额度）
     python -m AIClientCenter --validate-only
@@ -62,7 +65,7 @@ An AI client center that supports token and model rotation
 | `web/` | Flask dashboard 与受控手动调用页面。 |
 | `cli/` | 独立启动和配置校验入口。 |
 | `services/` | 余额查询与可轮换 Token 服务。 |
-| `config/` | 可复制到项目 `_config/` 的配置样例。 |
+| `config/` | 独立启动入口使用的配置：本机 `config.py`（已忽略）和可提交的 `example.py`。 |
 | `tools/` | 最小调用示例和可选 PyQt5 余额查询 UI。 |
 | `tests/` | 离线 pytest；`manual_agent_harness.py` 是会消耗套餐的人工冒烟脚本。 |
 | `recycled/` | 已废弃历史文件，不维护、不参与当前导入图。 |

@@ -1,6 +1,6 @@
 # --------------------------------------------------------------------------------
-# Python is config. We don't need a json file and load it, analyze it.
-# Rename ai_client_config_example.py to ai_client_config.py to enable this config.
+# 使用 Python 配置，便于直接构造并组合 Client。
+# 首次使用请复制本文件为同目录 config.py；该本机文件不会提交到 Git。
 # --------------------------------------------------------------------------------
 import os
 from typing import List, Dict
@@ -142,17 +142,24 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
     #   registration and real-name authentication.
     # ------------------------------------------------
 
-    zhipu_adapter = ZhipuSDKAdapter(
-        api_key=os.getenv('ZHIPU_API_KEY', "your-zhipu-key"),
-        enable_thinking=False
-    )
-    zhipu_client = StandardOpenAIClient(
-        name="zhipu-01",
-        openai_api=zhipu_adapter,
-        priority=CLIENT_PRIORITY_CONSUMABLES,
-        group_id='zhipu',
-        default_available=True
-    )
+    zhipu_client = None
+    zhipu_api_key = os.getenv('ZHIPU_API_KEY')
+    if zhipu_api_key:
+        zhipu_adapter = ZhipuSDKAdapter(
+            api_key=zhipu_api_key,
+            enable_thinking=False
+        )
+        zhipu_client = StandardOpenAIClient(
+            name="zhipu-01",
+            openai_api=zhipu_adapter,
+            priority=CLIENT_PRIORITY_CONSUMABLES,
+            group_id='zhipu',
+            default_available=True
+        )
+    else:
+        # 未配置则不实例化 SDK，保证样例可在未安装可选依赖时完成校验。
+        # 复制为 config.py 后设置 ZHIPU_API_KEY 即可启用。
+        print("配置提示：未设置 ZHIPU_API_KEY，跳过智谱 Client。")
 
     # --------------------------------------------------------
 
@@ -270,12 +277,11 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     # --------------------------------------------------------
 
-    return {
+    clients = {
         'sf_client_default': sf_client_default,
         'sf_client_a': sf_client_a,
         'sf_client_b': sf_client_b,
         'ms_client': ms_client,
-        'zhipu_client': zhipu_client,
         'longcat': longcat_client,
         'gemini': gemini_client_1,
         # 'codex_stateless': codex_stateless,
@@ -284,6 +290,9 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
         # 'unknown_balance': unknown_balance_client,
         # 'openclaw': openclaw_client,
     }
+    if zhipu_client is not None:
+        clients['zhipu_client'] = zhipu_client
+    return clients
 
 
 AI_CLIENTS = build_ai_clients()

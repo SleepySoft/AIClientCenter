@@ -1,8 +1,9 @@
 """AIClientCenter 的独立启动入口。
 
-默认加载项目 _config/ai_client_config.py，只验证 Python 配置和本机可用的
-CLI Harness，不会在启动时自动发送模型请求。启动后访问仪表盘的 Manual Call
-页面，可选择指定 Client 进行真实对话测试。
+默认加载本模块 config/config.py；首次使用尚未创建该文件时，临时加载
+config/example.py，并提示复制样例。启动时只验证 Python 配置和本机可用的 CLI
+Harness，不会自动发送模型请求。启动后访问仪表盘的 Manual Call 页面，可选择
+指定 Client 进行真实对话测试。
 
 示例：
     python -m AIClientCenter --validate-only
@@ -16,13 +17,15 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
-# launcher 位于 AIClientCenter/cli/，上移两层才是 IIS 根目录；
-# _config 是 IIS 的运行时配置目录，不属于 AIClientCenter 包。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = PROJECT_ROOT / "_config" / "ai_client_config.py"
+# launcher 位于 AIClientCenter/cli/。独立模块配置随包保存，避免依赖 IIS 的
+# `_config`；父项目根目录仅用于让直接执行 launcher 文件时也能找到包。
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PACKAGE_ROOT.parent
+DEFAULT_CONFIG = PACKAGE_ROOT / "config" / "config.py"
+EXAMPLE_CONFIG = PACKAGE_ROOT / "config" / "example.py"
 
 # 允许直接执行文件和 python -m 两种方式。
 if str(PROJECT_ROOT) not in sys.path:
@@ -33,6 +36,20 @@ from AIClientCenter.web.dashboard import AIDashboardService  # noqa: E402
 
 
 logger = logging.getLogger("AIClientCenterLauncher")
+
+
+def resolve_config_path(config_path: Optional[Path]) -> Tuple[Path, Optional[str]]:
+    """选择显式配置，或选择本模块配置及其首次使用的样例回退。"""
+    if config_path is not None:
+        return config_path, None
+    if DEFAULT_CONFIG.is_file():
+        return DEFAULT_CONFIG, None
+    if not EXAMPLE_CONFIG.is_file():
+        raise ValueError(f"默认配置和样例均不存在：{DEFAULT_CONFIG}，{EXAMPLE_CONFIG}")
+    return EXAMPLE_CONFIG, (
+        f"未找到本地配置 {DEFAULT_CONFIG}；正在使用样例 {EXAMPLE_CONFIG}。\n"
+        f"请复制样例后编辑：Copy-Item '{EXAMPLE_CONFIG}' '{DEFAULT_CONFIG}'"
+    )
 
 
 def load_config(config_path: Path) -> Tuple[Dict[str, BaseAIClient], Dict[str, int]]:
@@ -132,8 +149,8 @@ def _format_messages(title: str, messages: Iterable[str]) -> str:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="启动独立的 AIClientCenter 管理与手动测试页。")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
-                        help=f"AI Client Python 配置文件（默认：{DEFAULT_CONFIG}）")
+    parser.add_argument("--config", type=Path,
+                        help=f"AI Client Python 配置文件（默认：{DEFAULT_CONFIG}；不存在时使用样例）")
     parser.add_argument("--validate-only", action="store_true",
                         help="仅加载并验证配置，不启动 HTTP 服务。")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机。")
@@ -156,7 +173,10 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        clients, group_limits = load_config(args.config)
+        config_path, config_notice = resolve_config_path(args.config)
+        if config_notice:
+            print(f"配置提示：{config_notice}", file=sys.stderr)
+        clients, group_limits = load_config(config_path)
     except ValueError as exc:
         print(f"配置加载失败：{exc}", file=sys.stderr)
         return 2

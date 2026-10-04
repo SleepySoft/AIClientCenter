@@ -201,6 +201,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# 本机 AI Client 凭证与配置；从 config/example.py 复制生成。
+config/config.py
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
