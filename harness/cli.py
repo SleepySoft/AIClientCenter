@@ -36,20 +36,12 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from ..core.result import APIResult
-    from ..core.metrics import ClientMetricsMixin
-    from ..core.budget import BudgetPolicy
-    from ..core.manager import (
-        BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
-    )
-except ImportError:
-    from APIResult import APIResult
-    from LimitMixins import ClientMetricsMixin
-    from BudgetPolicy import BudgetPolicy
-    from AIClientManager import (
-        BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
-    )
+from AIClientCenter.core.result import APIResult
+from AIClientCenter.core.metrics import ClientMetricsMixin
+from AIClientCenter.core.budget import BudgetPolicy
+from AIClientCenter.core.manager import (
+    BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
+)
 
 logger = logging.getLogger(__name__)
 

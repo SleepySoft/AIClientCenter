@@ -7,10 +7,7 @@ import threading
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod
 
-try:
-    from .balance_query import get_siliconflow_balance
-except ImportError:
-    from AiServiceBalanceQuery import get_siliconflow_balance
+from AIClientCenter.services.balance_query import get_siliconflow_balance
 
 logger = logging.getLogger(__name__)
 

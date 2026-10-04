@@ -6,11 +6,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QDoubleSpinBox, QComboBox, QHeaderView, QMessageBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 
-try:
-    from AiServiceBalanceQuery import BalanceQueryService
-except ImportError as e:
-    print(str(e))
-    from ..services.balance_query import BalanceQueryService
+from AIClientCenter.services.balance_query import BalanceQueryService
 
 
 class QueryWorker(QObject):

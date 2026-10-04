@@ -12,10 +12,7 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import (RequestException, Timeout, ConnectionError,
                                  ConnectTimeout, ReadTimeout, ProxyError, SSLError)
 
-try:
-    from APIResult import APIResult
-except ImportError:
-    from ..core.result import APIResult
+from AIClientCenter.core.result import APIResult
 
 
 # --- Optional Dependencies ---

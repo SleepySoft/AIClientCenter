@@ -17,16 +17,10 @@ import logging
 import sys
 import time
 
-try:
-    from ..harness.cli import (
-        CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
-    )
-    from ..core.manager import AIClientManager, CLIENT_PRIORITY_CONSUMABLES
-except ImportError:
-    from AgentHarnessClients import (
-        CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
-    )
-    from AIClientManager import AIClientManager, CLIENT_PRIORITY_CONSUMABLES
+from AIClientCenter.harness.cli import (
+    CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
+)
+from AIClientCenter.core.manager import AIClientManager, CLIENT_PRIORITY_CONSUMABLES
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')

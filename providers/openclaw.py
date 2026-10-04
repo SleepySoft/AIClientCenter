@@ -39,13 +39,10 @@ import os
 import base64
 from typing import Dict, List, Optional, Any, Union
 
-# Handle relative/absolute imports
-try:
-    from ..core.manager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
-    from ..core.result import APIResult
-except ImportError:
-    from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
-    from APIResult import APIResult
+from AIClientCenter.core.manager import (
+    BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility,
+)
+from AIClientCenter.core.result import APIResult
 
 logger = logging.getLogger(__name__)
 

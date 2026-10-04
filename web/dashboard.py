@@ -7,12 +7,10 @@ from typing import Optional, Callable, Any
 from flask import Flask, Blueprint, jsonify, request, Response
 
 
-try:
-    from ..core.metrics import ClientMetricsMixin
-    from ..core.manager import AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL
-except ImportError:
-    from LimitMixins import ClientMetricsMixin
-    from AIClientManager import AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL
+from AIClientCenter.core.metrics import ClientMetricsMixin
+from AIClientCenter.core.manager import (
+    AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL,
+)
 
 
 logger = logging.getLogger("AIDashboard")
