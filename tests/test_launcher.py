@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from AIClientCenter.cli.launcher import build_manager, load_config, main, validate_config
+from AIClientCenter.cli.launcher import (
+    DEFAULT_CONFIG, PROJECT_ROOT, build_manager, load_config, main, validate_config,
+)
 from AIClientCenter.core.manager import BaseAIClient, ClientStatus
 from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 
@@ -21,6 +23,11 @@ class LauncherClient(BaseAIClient):
 
     def _chat_completion_sync(self, *args, **kwargs):
         raise AssertionError("launcher validation must not invoke a model")
+
+
+def test_default_config_is_loaded_from_iis_parent_config_directory():
+    assert PROJECT_ROOT == Path(__file__).resolve().parents[2]
+    assert DEFAULT_CONFIG == PROJECT_ROOT / "_config" / "ai_client_config.py"
 
 
 def test_load_config_executes_python_config_and_reads_public_contract(tmp_path: Path):

@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# launcher 位于 AIClientCenter/cli/，上移两层才是 IIS 根目录；
+# _config 是 IIS 的运行时配置目录，不属于 AIClientCenter 包。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "_config" / "ai_client_config.py"
 
 # 允许直接执行文件和 python -m 两种方式。
