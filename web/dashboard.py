@@ -8,8 +8,8 @@ from flask import Flask, Blueprint, jsonify, request, Response
 
 
 try:
-    from .LimitMixins import ClientMetricsMixin
-    from .AIClientManager import AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL
+    from ..core.metrics import ClientMetricsMixin
+    from ..core.manager import AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL
 except ImportError:
     from LimitMixins import ClientMetricsMixin
     from AIClientManager import AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL

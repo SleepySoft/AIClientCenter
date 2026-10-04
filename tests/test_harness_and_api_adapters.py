@@ -1,5 +1,5 @@
-from AIClientCenter.AgentHarnessClients import CodexCLIClient
-from AIClientCenter.OpenAICompatibleAPI import OpenAICompatibleAPI
+from AIClientCenter.harness.cli import CodexCLIClient
+from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 
 
 def test_codex_jsonl_parser_supports_current_event_envelope():

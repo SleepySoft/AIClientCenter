@@ -41,8 +41,8 @@ from typing import Dict, List, Optional, Any, Union
 
 # Handle relative/absolute imports
 try:
-    from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
-    from .APIResult import APIResult
+    from ..core.manager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
+    from ..core.result import APIResult
 except ImportError:
     from AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
     from APIResult import APIResult

@@ -1,7 +1,7 @@
 import os
 
-from AIClientCenter.AIClients import StandardOpenAIClient
-from AIClientCenter.OpenAICompatibleAPI import OpenAICompatibleAPI
+from AIClientCenter.providers.openai_clients import StandardOpenAIClient
+from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 
 
 api = OpenAICompatibleAPI(

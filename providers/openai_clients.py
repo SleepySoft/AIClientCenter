@@ -4,12 +4,12 @@ from typing import Dict, List, Optional, Any, Union
 
 # Handle relative/absolute imports
 try:
-    from .SimpleRotator import SimpleRotator
-    from .LimitMixins import ClientMetricsMixin
-    from .BudgetPolicy import BudgetPolicy
-    from .AIServiceTokenRotator import RotatableClient
-    from .OpenAICompatibleAPI import OpenAICompatibleAPI
-    from .AIClientManager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
+    from ..core.rotator import SimpleRotator
+    from ..core.metrics import ClientMetricsMixin
+    from ..core.budget import BudgetPolicy
+    from ..services.token_rotator import RotatableClient
+    from .openai_compatible import OpenAICompatibleAPI
+    from ..core.manager import BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility
 except ImportError:
     from SimpleRotator import SimpleRotator
     from LimitMixins import ClientMetricsMixin

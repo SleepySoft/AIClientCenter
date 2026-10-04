@@ -10,7 +10,7 @@ try:
     from AiServiceBalanceQuery import BalanceQueryService
 except ImportError as e:
     print(str(e))
-    from .AiServiceBalanceQuery import BalanceQueryService
+    from ..services.balance_query import BalanceQueryService
 
 
 class QueryWorker(QObject):

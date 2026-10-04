@@ -37,10 +37,10 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from .APIResult import APIResult
-    from .LimitMixins import ClientMetricsMixin
-    from .BudgetPolicy import BudgetPolicy
-    from .AIClientManager import (
+    from ..core.result import APIResult
+    from ..core.metrics import ClientMetricsMixin
+    from ..core.budget import BudgetPolicy
+    from ..core.manager import (
         BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
     )
 except ImportError:

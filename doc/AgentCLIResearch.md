@@ -5,7 +5,7 @@
 本文件保留 2026-09-17 的人工调研记录，便于追溯当时的 CLI 行为；其中的
 旧 Codex JSONL 事件名称和“quota_config 驱动健康度”的描述已经过时。
 
-- 当前正式实现只有 CodexCLIClient 与 KimiCLIClient，代码位于 AgentHarnessClients.py。
+- 当前正式实现只有 CodexCLIClient 与 KimiCLIClient，代码位于 harness/cli.py。
 - 当前本机验证的 Codex CLI 为 0.160.0。适配器解析 session_meta 与 event_msg
   包装的 item_completed、token_count、task_complete 事件；应以适配器和
   tests/test_harness_and_api_adapters.py 为准。

@@ -8,9 +8,9 @@ AgentHarnessClients 手动测试脚本
     4. AIClientManager 集成：注册 -> 获取 -> 释放 -> 统计
 
 用法：
-    python -m AIClientCenter.TestAgentHarnessClients          # 全部测试
-    python -m AIClientCenter.TestAgentHarnessClients codex    # 只测 codex
-    python -m AIClientCenter.TestAgentHarnessClients kimi     # 只测 kimi
+    python -m AIClientCenter.tests.manual_agent_harness          # 全部测试
+    python -m AIClientCenter.tests.manual_agent_harness codex    # 只测 codex
+    python -m AIClientCenter.tests.manual_agent_harness kimi     # 只测 kimi
 """
 
 import logging
@@ -18,10 +18,10 @@ import sys
 import time
 
 try:
-    from .AgentHarnessClients import (
+    from ..harness.cli import (
         CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
     )
-    from .AIClientManager import AIClientManager, CLIENT_PRIORITY_CONSUMABLES
+    from ..core.manager import AIClientManager, CLIENT_PRIORITY_CONSUMABLES
 except ImportError:
     from AgentHarnessClients import (
         CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,

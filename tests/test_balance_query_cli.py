@@ -1,4 +1,4 @@
-from AIClientCenter import AiServiceBalanceQuery
+from AIClientCenter.services import balance_query as AiServiceBalanceQuery
 
 
 def test_balance_query_main_reads_explicit_key_file(monkeypatch, tmp_path):

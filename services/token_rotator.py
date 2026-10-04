@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 from abc import ABC, abstractmethod
 
 try:
-    from .AiServiceBalanceQuery import get_siliconflow_balance
+    from .balance_query import get_siliconflow_balance
 except ImportError:
     from AiServiceBalanceQuery import get_siliconflow_balance
 

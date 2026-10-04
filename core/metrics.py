@@ -6,9 +6,9 @@ from typing import Dict, Any, List, Optional, Union
 from collections import Counter
 
 try:
-    from .BudgetPolicy import BudgetMode, BudgetPolicy
+    from .budget import BudgetMode, BudgetPolicy
 except ImportError:
-    from BudgetPolicy import BudgetMode, BudgetPolicy
+    from budget import BudgetMode, BudgetPolicy
 
 # Constants for Metric Types
 METRIC_TYPE_USAGE = "USAGE_LIMIT"  # Logic: Healthy when current < target

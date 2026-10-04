@@ -1,7 +1,7 @@
 from flask import Flask
 
-from AIClientCenter.AIClientManager import AIClientManager, BaseAIClient, ClientStatus
-from AIClientCenter.AIClientManagerBackend import AIDashboardService
+from AIClientCenter.core.manager import AIClientManager, BaseAIClient, ClientStatus
+from AIClientCenter.web.dashboard import AIDashboardService
 
 
 class DashboardClient(BaseAIClient):

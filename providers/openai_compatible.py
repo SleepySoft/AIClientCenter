@@ -15,7 +15,7 @@ from requests.exceptions import (RequestException, Timeout, ConnectionError,
 try:
     from APIResult import APIResult
 except ImportError:
-    from .APIResult import APIResult
+    from ..core.result import APIResult
 
 
 # --- Optional Dependencies ---

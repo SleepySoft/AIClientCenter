@@ -16,9 +16,9 @@ from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 
-from AIClientCenter.APIResult import APIResult
-from AIClientCenter.ClientStateSQLiteLogger import ClientStateSQLiteLogger
-from AIClientCenter.BudgetPolicy import BudgetDecision, BudgetPolicy
+from .result import APIResult
+from .state_logger import ClientStateSQLiteLogger
+from .budget import BudgetDecision, BudgetPolicy
 
 logger = logging.getLogger(__name__)
 

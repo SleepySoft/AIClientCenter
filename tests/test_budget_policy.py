@@ -1,4 +1,4 @@
-from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
+from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 
 
 def test_unknown_and_observed_budget_never_block_unknown_quota():

@@ -1,5 +1,5 @@
-from AIClientCenter.AIClientManager import BaseAIClient, ClientStatus
-from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
+from AIClientCenter.core.manager import BaseAIClient, ClientStatus
+from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 
 
 class FakeClient(BaseAIClient):

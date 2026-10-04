@@ -6,18 +6,18 @@ import os
 from typing import List, Dict
 
 from GlobalConfig import *
-from AIClientCenter.ZhipuSDKAdapter import ZhipuSDKAdapter
-from AIClientCenter.AIClients import StandardOpenAIClient, \
+from AIClientCenter.providers.zhipu import ZhipuSDKAdapter
+from AIClientCenter.providers.openai_clients import StandardOpenAIClient, \
     SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
-from AIClientCenter.AIClientManager import CLIENT_PRIORITY_EXPENSIVE, \
+from AIClientCenter.core.manager import CLIENT_PRIORITY_EXPENSIVE, \
     CLIENT_PRIORITY_FREEBIE, BaseAIClient, CLIENT_PRIORITY_NORMAL, CLIENT_PRIORITY_CONSUMABLES
-from AIClientCenter.OpenAICompatibleAPI import create_siliconflow_client, create_modelscope_client, \
+from AIClientCenter.providers.openai_compatible import create_siliconflow_client, create_modelscope_client, \
     create_long_cat_client
-from AIClientCenter.AIServiceTokenRotator import SiliconFlowServiceRotator
-from AIClientCenter.GoogleGeminiAdapter import GoogleGeminiAdapter
-from AIClientCenter.OpenClawClient import OpenClawClient
-from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
-from AIClientCenter.AgentHarnessClients import (
+from AIClientCenter.services.token_rotator import SiliconFlowServiceRotator
+from AIClientCenter.providers.gemini import GoogleGeminiAdapter
+from AIClientCenter.providers.openclaw import OpenClawClient
+from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
+from AIClientCenter.harness.cli import (
     CodexCLIClient, KimiCLIClient, MODE_SESSION, MODE_STATELESS,
 )
 

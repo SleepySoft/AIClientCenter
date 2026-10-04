@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from AIClientCenter.AIClientCenterLauncher import build_manager, load_config, main, validate_config
-from AIClientCenter.AIClientManager import BaseAIClient, ClientStatus
-from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
+from AIClientCenter.cli.launcher import build_manager, load_config, main, validate_config
+from AIClientCenter.core.manager import BaseAIClient, ClientStatus
+from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 
 
 class LauncherClient(BaseAIClient):

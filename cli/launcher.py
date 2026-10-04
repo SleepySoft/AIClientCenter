@@ -5,9 +5,8 @@ CLI Harness，不会在启动时自动发送模型请求。启动后访问仪表
 页面，可选择指定 Client 进行真实对话测试。
 
 示例：
-    python -m AIClientCenter.AIClientCenterLauncher --validate-only
-    python -m AIClientCenter.AIClientCenterLauncher --port 8010
-    python AIClientCenter/AIClientCenterLauncher.py --config _config/ai_client_config.py
+    python -m AIClientCenter --validate-only
+    python -m AIClientCenter.cli.launcher --port 8010
 """
 
 import argparse
@@ -27,8 +26,8 @@ DEFAULT_CONFIG = PROJECT_ROOT / "_config" / "ai_client_config.py"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from AIClientCenter.AIClientManager import AIClientManager, BaseAIClient  # noqa: E402
-from AIClientCenter.AIClientManagerBackend import AIDashboardService  # noqa: E402
+from AIClientCenter.core.manager import AIClientManager, BaseAIClient  # noqa: E402
+from AIClientCenter.web.dashboard import AIDashboardService  # noqa: E402
 
 
 logger = logging.getLogger("AIClientCenterLauncher")

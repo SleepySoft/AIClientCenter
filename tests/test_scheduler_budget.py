@@ -1,6 +1,6 @@
-from AIClientCenter.AIClientManager import AIClientManager, BaseAIClient, ClientStatus
-from AIClientCenter.BudgetPolicy import BudgetMode, BudgetPolicy
-from AIClientCenter.LimitMixins import ClientMetricsMixin
+from AIClientCenter.core.manager import AIClientManager, BaseAIClient, ClientStatus
+from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
+from AIClientCenter.core.metrics import ClientMetricsMixin
 
 
 class SchedulingClient(BaseAIClient):
