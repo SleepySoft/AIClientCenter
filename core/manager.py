@@ -676,6 +676,7 @@ class AIClientManager:
         self.group_limits: Dict[str, int] = {}
 
         self._lock = threading.RLock()
+        self._availability = threading.Condition(self._lock)
         self.monitor_thread = None
         self.monitor_running = False
 
@@ -704,11 +705,64 @@ class AIClientManager:
                 pass
 
             logger.info(f"Registered client: {getattr(client, 'name', 'Unknown')}")
+            self._availability.notify_all()
 
     def set_group_limit(self, group_id: str, limit: int):
         with self._lock:
             self.group_limits[group_id] = limit
             logger.info(f"Set concurrency limit for group '{group_id}' to {limit}")
+            self._availability.notify_all()
+
+    def wait_for_available_client(self,
+                                  user_name: str,
+                                  timeout: Optional[float] = None,
+                                  cancel_event: Optional[threading.Event] = None,
+                                  **selection_kwargs) -> Optional[BaseAIClient]:
+        """阻塞等待一个可用客户端；客户端释放时立即唤醒，超时仅作为状态检查兜底。"""
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative or None")
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._availability:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                client = self.get_available_client(user_name, **selection_kwargs)
+                if client is not None:
+                    return client
+
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None
+                self._availability.wait(remaining)
+
+    def notify_waiters(self) -> None:
+        """唤醒客户端等待者，供停机或外部调度状态变化时使用。"""
+        with self._availability:
+            self._availability.notify_all()
+
+    def get_scheduling_capacity(self,
+                                target_group_id: str = None,
+                                allow_private: bool = False) -> int:
+        """返回自动调度可使用的最大并发槽数（客户端数与分组上限的交集）。"""
+        with self._lock:
+            group_counts: Dict[Optional[str], int] = {}
+            for client in self.clients:
+                visibility = getattr(client, "visibility", None)
+                if visibility == ClientVisibility.NAME_ONLY:
+                    continue
+                if visibility == ClientVisibility.PRIVATE and not allow_private and not target_group_id:
+                    continue
+                group_id = getattr(client, "group_id", None)
+                if target_group_id and group_id != target_group_id:
+                    continue
+                group_counts[group_id] = group_counts.get(group_id, 0) + 1
+
+            capacity = 0
+            for group_id, count in group_counts.items():
+                limit = self.group_limits.get(group_id)
+                capacity += min(count, limit) if limit is not None else count
+            return capacity
 
     def get_available_client(self,
                              user_name: str,
@@ -952,8 +1006,6 @@ class AIClientManager:
                 current_count = current_group_usage.get(gid, 0)
 
                 if current_count >= limit:
-                    logger.warning(
-                        f"Skipping client {client_name}: Group '{gid}' limit reached ({current_count}/{limit})")
                     continue
 
             # --- SELECTION LOGIC ---
@@ -1007,6 +1059,8 @@ class AIClientManager:
                 if isinstance(client, BaseAIClient) else [str(client)]
             for key in keys_to_remove:
                 self._release_user_resources(key)
+            if keys_to_remove:
+                self._availability.notify_all()
 
     def _release_client_core(self, client: Any):
         """Internal helper to release the physical client lock."""
@@ -1171,6 +1225,7 @@ class AIClientManager:
         client._update_client_status(status)
         if status == ClientStatus.AVAILABLE:
             client._reset_error_count()
+            self.notify_waiters()
         return True
 
     def get_state_logger(self):

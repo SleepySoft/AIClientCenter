@@ -1,3 +1,6 @@
+import threading
+import time
+
 from AIClientCenter.core.manager import AIClientManager, BaseAIClient, ClientStatus
 from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 from AIClientCenter.core.metrics import ClientMetricsMixin
@@ -130,4 +133,59 @@ def test_explicit_client_name_returns_that_client_without_falling_back():
     manager.register_client(named)
 
     assert manager.get_available_client("user", target_client_name="named") is named
+    manager.stop_monitoring()
+
+
+def test_wait_for_available_client_is_woken_by_release():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    client = SchedulingClient("shared", 1, group_id="agent_cli")
+    manager.register_client(client)
+    manager.set_group_limit("agent_cli", 1)
+    assert manager.get_available_client("first") is client
+
+    result = []
+    started = threading.Event()
+
+    def wait_for_client():
+        started.set()
+        result.append(manager.wait_for_available_client("second", timeout=2))
+
+    waiter = threading.Thread(target=wait_for_client)
+    waiter.start()
+    assert started.wait(0.5)
+    time.sleep(0.05)
+    assert result == []
+
+    manager.release_client("first")
+    waiter.join(0.5)
+
+    assert result == [client]
+    manager.release_client("second")
+    manager.stop_monitoring()
+
+
+def test_wait_for_available_client_returns_none_on_timeout():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    client = SchedulingClient("shared", 1)
+    manager.register_client(client)
+    assert manager.get_available_client("first") is client
+
+    started = time.monotonic()
+    selected = manager.wait_for_available_client("second", timeout=0.05)
+
+    assert selected is None
+    assert time.monotonic() - started >= 0.04
+    manager.release_client("first")
+    manager.stop_monitoring()
+
+
+def test_scheduling_capacity_respects_group_limits():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    manager.register_client(SchedulingClient("cli-1", 1, group_id="agent_cli"))
+    manager.register_client(SchedulingClient("cli-2", 2, group_id="agent_cli"))
+    manager.register_client(SchedulingClient("api", 3, group_id="api"))
+    manager.set_group_limit("agent_cli", 1)
+
+    assert manager.get_scheduling_capacity() == 2
+    assert manager.get_scheduling_capacity(target_group_id="agent_cli") == 1
     manager.stop_monitoring()
