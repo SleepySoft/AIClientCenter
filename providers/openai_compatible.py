@@ -642,7 +642,7 @@ def create_gemini_client(token: Optional[str] = None, model: Optional[str] = Non
     client = OpenAICompatibleAPI(
         api_base_url='https://generativelanguage.googleapis.com/v1beta/openai',
         token=token or os.getenv("GEMINI_API_KEY"),
-        default_model=model or 'gemini-2.5-flash-lite',
+        default_model=model or 'gemini-3.5-flash-lite',
         proxies=proxies,
     )
     return client

@@ -42,6 +42,7 @@ def test_gemini_factory_has_no_implicit_local_proxy(monkeypatch):
     monkeypatch.delenv("GEMINI_PROXY", raising=False)
     api = create_gemini_client(token="test")
     assert api.proxies == {}
+    assert api.get_using_model() == "gemini-3.5-flash-lite"
 
     monkeypatch.setenv("GEMINI_PROXY", "http://127.0.0.1:10809")
     proxied = create_gemini_client(token="test")
