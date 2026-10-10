@@ -634,14 +634,51 @@ def create_modelscope_client(token: Optional[str] = None, model: Optional[str] =
     return client
 
 
-def create_gemini_client(token: Optional[str] = None, model: Optional[str] = None):
+def create_gemini_client(token: Optional[str] = None, model: Optional[str] = None,
+                         proxies: Optional[Dict[str, str]] = None):
+    proxy = os.getenv("GEMINI_PROXY")
+    if proxies is None and proxy:
+        proxies = {"http": proxy, "https": proxy}
     client = OpenAICompatibleAPI(
         api_base_url='https://generativelanguage.googleapis.com/v1beta/openai',
         token=token or os.getenv("GEMINI_API_KEY"),
-        default_model=model or 'models/gemini-pro-latest',
-        proxies={
-            "http": "http://127.0.0.1:10809",
-            "https": "http://127.0.0.1:10809"
-        }
+        default_model=model or 'gemini-2.5-flash-lite',
+        proxies=proxies,
     )
     return client
+
+
+def create_groq_client(token: Optional[str] = None, model: Optional[str] = None):
+    return OpenAICompatibleAPI(
+        api_base_url='https://api.groq.com/openai/v1',
+        token=token or os.getenv("GROQ_API_KEY"),
+        default_model=model or 'openai/gpt-oss-120b',
+    )
+
+
+def create_openrouter_client(token: Optional[str] = None, model: Optional[str] = None):
+    return OpenAICompatibleAPI(
+        api_base_url='https://openrouter.ai/api/v1',
+        token=token or os.getenv("OPENROUTER_API_KEY"),
+        default_model=model or 'openrouter/free',
+    )
+
+
+def create_mistral_client(token: Optional[str] = None, model: Optional[str] = None):
+    return OpenAICompatibleAPI(
+        api_base_url='https://api.mistral.ai/v1',
+        token=token or os.getenv("MISTRAL_API_KEY"),
+        default_model=model or 'mistral-small-latest',
+    )
+
+
+def create_cloudflare_client(token: Optional[str] = None, model: Optional[str] = None,
+                             account_id: Optional[str] = None):
+    account_id = account_id or os.getenv("CLOUDFLARE_ACCOUNT_ID")
+    if not account_id:
+        raise ValueError("Cloudflare Workers AI requires CLOUDFLARE_ACCOUNT_ID")
+    return OpenAICompatibleAPI(
+        api_base_url=f'https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1',
+        token=token or os.getenv("CLOUDFLARE_API_TOKEN"),
+        default_model=model or '@cf/ibm-granite/granite-4.0-h-micro',
+    )
