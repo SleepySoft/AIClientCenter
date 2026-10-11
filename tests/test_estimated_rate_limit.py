@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from AIClientCenter.core.manager import AIClientManager, ClientStatus
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter, estimate_message_tokens
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
@@ -105,3 +109,60 @@ def test_manager_stats_expose_estimated_rate_limit_snapshot():
         "rpm": 80, "tpm": 800, "rpd": 800,
     }
     manager.stop_monitoring()
+
+
+def test_sqlite_ledger_survives_limiter_restart(tmp_path):
+    clock = FakeClock()
+    database = tmp_path / "rate_limits.sqlite3"
+    first = EstimatedRateLimiter(
+        rpd=2,
+        utilization_ratio=1,
+        clock=clock,
+        storage_path=database,
+        storage_namespace="gemini:test-model",
+    )
+
+    assert first.try_reserve(estimated_tokens=10) is not None
+    assert first.try_reserve(estimated_tokens=10) is not None
+
+    restarted = EstimatedRateLimiter(
+        rpd=2,
+        utilization_ratio=1,
+        clock=clock,
+        storage_path=database,
+        storage_namespace="gemini:test-model",
+    )
+
+    assert restarted.try_reserve(estimated_tokens=10) is None
+    assert restarted.snapshot()["used"]["rpd"] == 2
+    assert restarted.snapshot()["persistent"] is True
+
+
+def test_sqlite_ledger_reconciles_tokens_and_removes_expired_rows(tmp_path):
+    clock = FakeClock()
+    database = tmp_path / "rate_limits.sqlite3"
+    limiter = EstimatedRateLimiter(
+        tpm=100,
+        rpd=2,
+        utilization_ratio=1,
+        clock=clock,
+        storage_path=database,
+        storage_namespace="gemini:test-model",
+    )
+    reservation = limiter.try_reserve(estimated_tokens=20)
+
+    limiter.reconcile(reservation, 55)
+
+    assert limiter.snapshot()["used"] == {"rpm": 1, "tpm": 55, "rpd": 1}
+    assert limiter.try_reserve(estimated_tokens=46) is None
+
+    clock.now += 86400
+    assert limiter.try_reserve(estimated_tokens=20) is not None
+    with sqlite3.connect(database) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM rate_limit_usage").fetchone()[0]
+    assert count == 1
+
+
+def test_sqlite_ledger_requires_namespace(tmp_path):
+    with pytest.raises(ValueError, match="storage_namespace"):
+        EstimatedRateLimiter(rpd=10, storage_path=tmp_path / "rate_limits.sqlite3")
