@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Any, Union
 from AIClientCenter.core.rotator import SimpleRotator
 from AIClientCenter.core.metrics import ClientMetricsMixin
 from AIClientCenter.core.budget import BudgetPolicy
+from AIClientCenter.core.budget import BudgetDecision
+from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.services.token_rotator import RotatableClient
 from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 from AIClientCenter.core.manager import (
@@ -108,6 +110,47 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             max_tokens=max_tokens,
             is_health_check=is_health_check
         )
+
+
+class RateLimitedOpenAIClient(StandardOpenAIClient):
+    """请求前按估算输入 token 预占 RPM/TPM/RPD 的固定模型客户端。"""
+
+    def __init__(self, *args, rate_limiter: EstimatedRateLimiter, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rate_limiter = rate_limiter
+
+    @override
+    def chat(self, messages: List[Dict[str, str]], model: Optional[str] = None,
+             temperature: float = 0.7, max_tokens: int = 4096,
+             is_health_check: bool = False) -> Dict[str, Any]:
+        reservation = self.rate_limiter.try_reserve(messages)
+        if reservation is None:
+            return {
+                "error": "local_rate_limit",
+                "error_type": "recoverable",
+                "message": "Estimated RPM/TPM/RPD headroom is exhausted",
+                "rate_limit": self.rate_limiter.snapshot(),
+            }
+        response = super().chat(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, is_health_check=is_health_check,
+        )
+        usage = response.get("usage", {}) if isinstance(response, dict) else {}
+        self.rate_limiter.reconcile(reservation, usage.get("prompt_tokens"))
+        return response
+
+    @override
+    def get_budget_decision(self) -> BudgetDecision:
+        decision = super().get_budget_decision()
+        if not decision.allowed or self.rate_limiter.can_accept():
+            return decision
+        return BudgetDecision(False, 0.0, "estimated_rate_limit_reached")
+
+    def get_scheduling_pressure(self) -> float:
+        return float(self.rate_limiter.snapshot()["pressure"])
+
+    def get_rate_limit_snapshot(self) -> Dict[str, Any]:
+        return self.rate_limiter.snapshot()
 
 
 class SelfRotatingOpenAIClient(StandardOpenAIClient):

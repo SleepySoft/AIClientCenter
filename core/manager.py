@@ -1047,7 +1047,14 @@ class AIClientManager:
         # 优先级数值越小越优先。软限额到达后施加足够大的本地惩罚，
         # 但在它是唯一可用 Client 时仍会被选中。
         penalty = (1.0 - multiplier) * 1000.0
-        return getattr(client, 'priority', CLIENT_PRIORITY_NORMAL) + penalty
+        pressure_getter = getattr(client, 'get_scheduling_pressure', None)
+        try:
+            pressure = max(0.0, min(1.0, float(pressure_getter()))) \
+                if callable(pressure_getter) else 0.0
+        except Exception:
+            pressure = 0.0
+        # 只在同优先级 Client 之间按配额压力分流，不跨越整数优先级。
+        return getattr(client, 'priority', CLIENT_PRIORITY_NORMAL) + penalty + pressure * 0.01
 
     def release_client(self, client: BaseAIClient | str):
         """
@@ -1105,6 +1112,8 @@ class AIClientManager:
                 budget_policy = getattr(client, 'budget_policy', None)
                 metrics_detail = client.get_standardized_metrics() if hasattr(client,
                                                                               'get_standardized_metrics') else {}
+                rate_limit_getter = getattr(client, 'get_rate_limit_snapshot', None)
+                rate_limit_detail = rate_limit_getter() if callable(rate_limit_getter) else None
 
                 # Access internal status directly for raw counters
                 raw_status = client._status
@@ -1160,7 +1169,8 @@ class AIClientManager:
                         "error_rate_percent": round(err_rate, 1),
                         "last_chat_ts": raw_status.get('last_chat', 0),
                     },
-                    "metrics": metrics_detail  # Token limits, RPM, etc.
+                    "metrics": metrics_detail,
+                    "rate_limit": rate_limit_detail,
                 })
 
             # Sort: 1. By Priority (asc), 2. By Busy Status (busy first).
