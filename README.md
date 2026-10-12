@@ -99,6 +99,12 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 本地预算策略：unknown、observed、soft_limit、hard_limit。适用于 API、
 > Agent CLI Harness 以及无法查询余额的服务。
 
+[core/credentials.py](core/credentials.py)
+
+> 多 API Key 配置归一化。Python 配置文件可用 `{"account_a": "key..."}` 的形式
+> 声明多个独立额度；客户端名只显示别名，SQLite 限额账本使用不可逆指纹隔离额度，
+> 不记录明文 Key。空映射会兼容回退到服务商原有的单 Key 环境变量。
+
 [services/token_rotator.py](services/token_rotator.py)
 
 > 批量Token管理及自动轮转功能。
@@ -126,8 +132,9 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 [providers/groq.py](providers/groq.py)
 
 > Groq 免费层大模型配置。默认只启用 `openai/gpt-oss-120b`，排除账号中可见的
-> 20B/27B/7B 模型；从 `GROQ_API_KEY` 读取密钥，按官方免费层 RPM、RPD、TPM、TPD
-> 的 80% 主动控流并固定单并发。Groq 免费层 TPM 较低，长 Prompt 会在本地拒绝而不
+> 20B/27B/7B 模型；`build_groq_clients(api_keys={...})` 可直接接收多 Key 配置，
+> 未传入时回退读取 `GROQ_API_KEY`。每个 Key 独立按官方免费层 RPM、RPD、TPM、TPD
+> 的 80% 主动控流并单并发。Groq 免费层 TPM 较低，长 Prompt 会在本地拒绝而不
 > 消耗远端请求；可用 `GROQ_QUOTA_SAFETY_RATIO` 和
 > `GROQ_COMPLETION_RESERVE_TOKENS` 调整保守程度。限额以
 > [Groq Rate Limits](https://console.groq.com/docs/rate-limits) 和账号 Limits 页面为准。

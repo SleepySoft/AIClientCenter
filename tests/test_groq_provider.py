@@ -30,6 +30,34 @@ def test_groq_builder_only_enables_large_model_and_applies_free_limits(tmp_path)
     }
 
 
+def test_groq_builder_gives_each_configured_key_an_independent_ledger(tmp_path):
+    clients = build_groq_clients(
+        api_keys={"account-a": "test-key-a", "account-b": "test-key-b"},
+        storage_path=str(tmp_path / "limits.sqlite3"),
+    )
+
+    assert len(clients) == 2
+    assert set(clients) == {
+        "groq_account-a_openai_gpt_oss_120b",
+        "groq_account-b_openai_gpt_oss_120b",
+    }
+    namespaces = {
+        client.get_rate_limit_snapshot()["storage_namespace"]
+        for client in clients.values()
+    }
+    assert len(namespaces) == 2
+    assert all(namespace.startswith("groq:") for namespace in namespaces)
+    assert all("test-key" not in namespace for namespace in namespaces)
+
+
+def test_groq_builder_rejects_duplicate_key_as_independent_quota(tmp_path):
+    with pytest.raises(ValueError, match="同一个 API Key"):
+        build_groq_clients(
+            api_keys={"account-a": "same-key", "account-b": "same-key"},
+            storage_path=str(tmp_path / "limits.sqlite3"),
+        )
+
+
 def test_groq_builder_rejects_small_or_unregistered_models(monkeypatch, tmp_path):
     monkeypatch.setenv("GROQ_MODELS", "qwen/qwen3.8-27b")
 

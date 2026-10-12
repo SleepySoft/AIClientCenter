@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from AIClientCenter.core.credentials import APIKeyConfig, resolve_api_keys
 from AIClientCenter.core.manager import BaseAIClient, CLIENT_PRIORITY_FREEBIE
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
@@ -78,39 +79,45 @@ def _rate_limit_db_path(configured: Optional[str] = None) -> Path:
 def build_groq_clients(
         api_key: Optional[str] = None,
         *,
+        api_keys: APIKeyConfig = None,
         storage_path: Optional[str] = None,
 ) -> dict[str, BaseAIClient]:
-    """构造单并发 Groq 免费客户端；没有 Key 时安静跳过。"""
+    """每个 Key 构造一个单并发 Groq 免费客户端；没有 Key 时安静跳过。"""
 
-    token = (api_key or os.getenv("GROQ_API_KEY", "")).strip()
-    if not token:
+    if api_key is not None and api_keys is not None:
+        raise ValueError("api_key 与 api_keys 不能同时配置")
+    configured = {"explicit": api_key} if api_key is not None else api_keys
+    credentials = resolve_api_keys(configured, env_name="GROQ_API_KEY")
+    if not credentials:
         return {}
 
     ratio = _ratio()
     completion_reserve = _completion_reserve()
     database = _rate_limit_db_path(storage_path)
     clients: dict[str, BaseAIClient] = {}
-    for model in _selected_models():
-        limits = GROQ_LARGE_MODEL_LIMITS[model]
-        limiter = EstimatedRateLimiter(
-            rpm=limits.rpm,
-            rpd=limits.rpd,
-            tpm=limits.tpm,
-            tpd=limits.tpd,
-            utilization_ratio=ratio,
-            storage_path=database,
-            storage_namespace=f"groq:{model}",
-        )
-        key = "groq_" + model.replace("/", "_").replace("-", "_")
-        clients[key] = RateLimitedOpenAIClient(
-            name=f"Groq {model}",
-            openai_api=create_groq_client(token=token, model=model),
-            rate_limiter=limiter,
-            # Groq 的 TPM/TPD 是 token 总量口径，成功后按 total_tokens 校正。
-            token_usage_field="total_tokens",
-            completion_reserve_tokens=completion_reserve,
-            priority=CLIENT_PRIORITY_FREEBIE,
-            group_id=GROQ_GROUP_ID,
-            default_available=True,
-        )
+    for credential in credentials:
+        for model in _selected_models():
+            limits = GROQ_LARGE_MODEL_LIMITS[model]
+            limiter = EstimatedRateLimiter(
+                rpm=limits.rpm,
+                rpd=limits.rpd,
+                tpm=limits.tpm,
+                tpd=limits.tpd,
+                utilization_ratio=ratio,
+                storage_path=database,
+                storage_namespace=f"groq:{credential.quota_id}:{model}",
+            )
+            model_key = model.replace("/", "_").replace("-", "_")
+            key = f"groq_{credential.alias}_{model_key}"
+            clients[key] = RateLimitedOpenAIClient(
+                name=f"Groq [{credential.alias}] {model}",
+                openai_api=create_groq_client(token=credential.api_key, model=model),
+                rate_limiter=limiter,
+                # Groq 的 TPM/TPD 是 token 总量口径，成功后按 total_tokens 校正。
+                token_usage_field="total_tokens",
+                completion_reserve_tokens=completion_reserve,
+                priority=CLIENT_PRIORITY_FREEBIE,
+                group_id=GROQ_GROUP_ID,
+                default_available=True,
+            )
     return clients
