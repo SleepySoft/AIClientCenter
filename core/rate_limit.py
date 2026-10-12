@@ -105,7 +105,9 @@ class SQLiteRateLimitLedger:
         return max(0, int(cursor.rowcount))
 
     @staticmethod
-    def _usage(connection: sqlite3.Connection, namespace: str, now: float) -> tuple[int, int, int]:
+    def _usage(
+            connection: sqlite3.Connection, namespace: str, now: float,
+    ) -> tuple[int, int, int, int]:
         minute_count, minute_tokens = connection.execute(
             """
             SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0)
@@ -114,24 +116,30 @@ class SQLiteRateLimitLedger:
             """,
             (namespace, now - 60.0),
         ).fetchone()
-        day_count = connection.execute(
-            "SELECT COUNT(*) FROM rate_limit_usage WHERE namespace = ?",
+        day_count, day_tokens = connection.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0)
+            FROM rate_limit_usage
+            WHERE namespace = ?
+            """,
             (namespace,),
-        ).fetchone()[0]
-        return int(minute_count), int(minute_tokens), int(day_count)
+        ).fetchone()
+        return int(minute_count), int(minute_tokens), int(day_count), int(day_tokens)
 
     def try_reserve(
             self, *, namespace: str, now: float, prompt_tokens: int,
             rpm_limit: Optional[int], tpm_limit: Optional[int], rpd_limit: Optional[int],
+            tpd_limit: Optional[int],
     ) -> Optional[RateLimitReservation]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._cleanup(connection, now)
-            used_rpm, used_tpm, used_rpd = self._usage(connection, namespace, now)
+            used_rpm, used_tpm, used_rpd, used_tpd = self._usage(connection, namespace, now)
             if not (
                 (rpm_limit is None or used_rpm + 1 <= rpm_limit)
                 and (tpm_limit is None or used_tpm + prompt_tokens <= tpm_limit)
                 and (rpd_limit is None or used_rpd + 1 <= rpd_limit)
+                and (tpd_limit is None or used_tpd + prompt_tokens <= tpd_limit)
             ):
                 return None
             reservation_id = uuid4().hex
@@ -155,7 +163,7 @@ class SQLiteRateLimitLedger:
                 (prompt_tokens, namespace, reservation_id),
             )
 
-    def usage(self, namespace: str, now: float) -> tuple[int, int, int]:
+    def usage(self, namespace: str, now: float) -> tuple[int, int, int, int]:
         with self._connect() as connection:
             self._cleanup(connection, now)
             return self._usage(connection, namespace, now)
@@ -174,6 +182,7 @@ class EstimatedRateLimiter:
             rpm: Optional[int] = None,
             tpm: Optional[int] = None,
             rpd: Optional[int] = None,
+            tpd: Optional[int] = None,
             utilization_ratio: float = 0.8,
             clock: Callable[[], float] = time.time,
             storage_path: Optional[os.PathLike[str] | str] = None,
@@ -181,12 +190,13 @@ class EstimatedRateLimiter:
     ):
         if not 0 < utilization_ratio <= 1:
             raise ValueError("utilization_ratio 必须在 (0, 1] 范围内")
-        for name, value in (("rpm", rpm), ("tpm", tpm), ("rpd", rpd)):
+        for name, value in (("rpm", rpm), ("tpm", tpm), ("rpd", rpd), ("tpd", tpd)):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} 必须为正整数或 None")
         self.rpm = rpm
         self.tpm = tpm
         self.rpd = rpd
+        self.tpd = tpd
         self.utilization_ratio = float(utilization_ratio)
         self._clock = clock
         self._ledger = SQLiteRateLimitLedger(storage_path) if storage_path is not None else None
@@ -194,7 +204,7 @@ class EstimatedRateLimiter:
             raise ValueError("启用 SQLite 限额账本时必须提供 storage_namespace")
         self.storage_namespace = str(storage_namespace) if storage_namespace else None
         self._minute: deque[RateLimitReservation] = deque()
-        self._day: deque[float] = deque()
+        self._day: deque[RateLimitReservation] = deque()
         self._lock = threading.RLock()
 
     @staticmethod
@@ -219,13 +229,14 @@ class EstimatedRateLimiter:
                     rpm_limit=self._effective_limit(self.rpm),
                     tpm_limit=self._effective_limit(self.tpm),
                     rpd_limit=self._effective_limit(self.rpd),
+                    tpd_limit=self._effective_limit(self.tpd),
                 )
             self._prune(now)
             if not self._can_fit(estimate):
                 return None
             reservation = RateLimitReservation(now, estimate)
             self._minute.append(reservation)
-            self._day.append(now)
+            self._day.append(reservation)
             return reservation
 
     def reconcile(self, reservation: RateLimitReservation, actual_prompt_tokens: Any) -> None:
@@ -251,9 +262,10 @@ class EstimatedRateLimiter:
             now = self._clock()
             estimate = max(1, int(estimated_tokens))
             if self._ledger is not None:
-                used_rpm, used_tpm, used_rpd = self._ledger.usage(
+                used_rpm, used_tpm, used_rpd, used_tpd = self._ledger.usage(
                     self.storage_namespace, now)
-                return self._usage_can_fit(used_rpm, used_tpm, used_rpd, estimate)
+                return self._usage_can_fit(
+                    used_rpm, used_tpm, used_rpd, used_tpd, estimate)
             self._prune(now)
             return self._can_fit(estimate)
 
@@ -261,19 +273,21 @@ class EstimatedRateLimiter:
         with self._lock:
             now = self._clock()
             if self._ledger is not None:
-                used_rpm, used_tpm, used_rpd = self._ledger.usage(
+                used_rpm, used_tpm, used_rpd, used_tpd = self._ledger.usage(
                     self.storage_namespace, now)
             else:
                 self._prune(now)
                 used_rpm = len(self._minute)
                 used_tpm = sum(item.prompt_tokens for item in self._minute)
                 used_rpd = len(self._day)
+                used_tpd = sum(item.prompt_tokens for item in self._day)
             effective = {
                 "rpm": self._effective_limit(self.rpm),
                 "tpm": self._effective_limit(self.tpm),
                 "rpd": self._effective_limit(self.rpd),
+                "tpd": self._effective_limit(self.tpd),
             }
-            used = {"rpm": used_rpm, "tpm": used_tpm, "rpd": used_rpd}
+            used = {"rpm": used_rpm, "tpm": used_tpm, "rpd": used_rpd, "tpd": used_tpd}
             remaining = {
                 key: None if effective[key] is None else max(0, effective[key] - used[key])
                 for key in effective
@@ -287,7 +301,10 @@ class EstimatedRateLimiter:
                 "persistent": self._ledger is not None,
                 "storage_namespace": self.storage_namespace,
                 "utilization_ratio": self.utilization_ratio,
-                "limits": {"rpm": self.rpm, "tpm": self.tpm, "rpd": self.rpd},
+                "limits": {
+                    "rpm": self.rpm, "tpm": self.tpm,
+                    "rpd": self.rpd, "tpd": self.tpd,
+                },
                 "effective_limits": effective,
                 "used": used,
                 "remaining": remaining,
@@ -299,19 +316,23 @@ class EstimatedRateLimiter:
             len(self._minute),
             sum(x.prompt_tokens for x in self._minute),
             len(self._day),
+            sum(x.prompt_tokens for x in self._day),
             prompt_tokens,
         )
 
     def _usage_can_fit(
-            self, used_rpm: int, used_tpm: int, used_rpd: int, prompt_tokens: int,
+            self, used_rpm: int, used_tpm: int, used_rpd: int,
+            used_tpd: int, prompt_tokens: int,
     ) -> bool:
         rpm_limit = self._effective_limit(self.rpm)
         tpm_limit = self._effective_limit(self.tpm)
         rpd_limit = self._effective_limit(self.rpd)
+        tpd_limit = self._effective_limit(self.tpd)
         return (
             (rpm_limit is None or used_rpm + 1 <= rpm_limit)
             and (tpm_limit is None or used_tpm + prompt_tokens <= tpm_limit)
             and (rpd_limit is None or used_rpd + 1 <= rpd_limit)
+            and (tpd_limit is None or used_tpd + prompt_tokens <= tpd_limit)
         )
 
     def _effective_limit(self, limit: Optional[int]) -> Optional[int]:
@@ -322,5 +343,5 @@ class EstimatedRateLimiter:
         while self._minute and self._minute[0].timestamp <= minute_start:
             self._minute.popleft()
         day_start = now - 86400.0
-        while self._day and self._day[0] <= day_start:
+        while self._day and self._day[0].timestamp <= day_start:
             self._day.popleft()

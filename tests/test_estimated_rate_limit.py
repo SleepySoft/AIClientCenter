@@ -73,6 +73,14 @@ def test_limiter_reconciles_estimate_with_actual_prompt_tokens():
     assert limiter.try_reserve(estimated_tokens=26) is None
 
 
+def test_limiter_applies_daily_token_limit():
+    limiter = EstimatedRateLimiter(tpd=100, utilization_ratio=0.8)
+
+    assert limiter.try_reserve(estimated_tokens=50) is not None
+    assert limiter.try_reserve(estimated_tokens=31) is None
+    assert limiter.snapshot()["effective_limits"]["tpd"] == 80
+
+
 def test_shared_limiter_blocks_second_client_without_hurting_health():
     limiter = EstimatedRateLimiter(rpm=1, utilization_ratio=1)
     first_api = FakeAPI()
@@ -106,7 +114,7 @@ def test_manager_stats_expose_estimated_rate_limit_snapshot():
 
     assert details["rate_limit"]["estimated"] is True
     assert details["rate_limit"]["effective_limits"] == {
-        "rpm": 80, "tpm": 800, "rpd": 800,
+        "rpm": 80, "tpm": 800, "rpd": 800, "tpd": None,
     }
     manager.stop_monitoring()
 
@@ -153,7 +161,9 @@ def test_sqlite_ledger_reconciles_tokens_and_removes_expired_rows(tmp_path):
 
     limiter.reconcile(reservation, 55)
 
-    assert limiter.snapshot()["used"] == {"rpm": 1, "tpm": 55, "rpd": 1}
+    assert limiter.snapshot()["used"] == {
+        "rpm": 1, "tpm": 55, "rpd": 1, "tpd": 55,
+    }
     assert limiter.try_reserve(estimated_tokens=46) is None
 
     clock.now += 86400
@@ -166,3 +176,21 @@ def test_sqlite_ledger_reconciles_tokens_and_removes_expired_rows(tmp_path):
 def test_sqlite_ledger_requires_namespace(tmp_path):
     with pytest.raises(ValueError, match="storage_namespace"):
         EstimatedRateLimiter(rpd=10, storage_path=tmp_path / "rate_limits.sqlite3")
+
+
+def test_rate_limited_client_reserves_completion_and_reconciles_total_tokens():
+    limiter = EstimatedRateLimiter(tpm=100, tpd=100, utilization_ratio=1)
+    client = RateLimitedOpenAIClient(
+        name="total-token-provider",
+        openai_api=FakeAPI(),
+        rate_limiter=limiter,
+        token_usage_field="total_tokens",
+        completion_reserve_tokens=20,
+        default_available=True,
+    )
+
+    assert "error" not in client.chat(
+        [{"role": "user", "content": "hello"}], max_tokens=50)
+    snapshot = limiter.snapshot()
+    assert snapshot["used"]["tpm"] == 8
+    assert snapshot["used"]["tpd"] == 8

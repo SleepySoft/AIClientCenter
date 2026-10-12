@@ -123,6 +123,15 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 
 > Gemini客户端。由于本人账号限制，无法白嫖。
 
+[providers/groq.py](providers/groq.py)
+
+> Groq 免费层大模型配置。默认只启用 `openai/gpt-oss-120b`，排除账号中可见的
+> 20B/27B/7B 模型；从 `GROQ_API_KEY` 读取密钥，按官方免费层 RPM、RPD、TPM、TPD
+> 的 80% 主动控流并固定单并发。Groq 免费层 TPM 较低，长 Prompt 会在本地拒绝而不
+> 消耗远端请求；可用 `GROQ_QUOTA_SAFETY_RATIO` 和
+> `GROQ_COMPLETION_RESERVE_TOKENS` 调整保守程度。限额以
+> [Groq Rate Limits](https://console.groq.com/docs/rate-limits) 和账号 Limits 页面为准。
+
 [harness/cli.py](harness/cli.py)
 
 > 基于本机命令行 AI Agent（Codex CLI / Kimi CLI）的客户端实现。

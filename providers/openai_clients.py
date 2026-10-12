@@ -117,15 +117,25 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
 class RateLimitedOpenAIClient(StandardOpenAIClient):
     """请求前按估算输入 token 预占 RPM/TPM/RPD 的固定模型客户端。"""
 
-    def __init__(self, *args, rate_limiter: EstimatedRateLimiter, **kwargs):
+    def __init__(
+            self, *args, rate_limiter: EstimatedRateLimiter,
+            token_usage_field: str = "prompt_tokens",
+            completion_reserve_tokens: int = 0,
+            **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.rate_limiter = rate_limiter
+        self.token_usage_field = str(token_usage_field)
+        self.completion_reserve_tokens = max(0, int(completion_reserve_tokens))
 
     @override
     def chat(self, messages: List[Dict[str, str]], model: Optional[str] = None,
              temperature: float = 0.7, max_tokens: int = 4096,
              is_health_check: bool = False) -> Dict[str, Any]:
-        reservation = self.rate_limiter.try_reserve(messages)
+        estimated_tokens = self.rate_limiter.estimate_tokens(messages)
+        if self.completion_reserve_tokens:
+            estimated_tokens += min(max(0, int(max_tokens)), self.completion_reserve_tokens)
+        reservation = self.rate_limiter.try_reserve(estimated_tokens=estimated_tokens)
         if reservation is None:
             return {
                 "error": "local_rate_limit",
@@ -138,7 +148,7 @@ class RateLimitedOpenAIClient(StandardOpenAIClient):
             max_tokens=max_tokens, is_health_check=is_health_check,
         )
         usage = response.get("usage", {}) if isinstance(response, dict) else {}
-        self.rate_limiter.reconcile(reservation, usage.get("prompt_tokens"))
+        self.rate_limiter.reconcile(reservation, usage.get(self.token_usage_field))
         return response
 
     @override
