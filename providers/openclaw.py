@@ -40,7 +40,7 @@ import base64
 from typing import Dict, List, Optional, Any, Union
 
 from AIClientCenter.core.manager import (
-    BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility,
+    BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility, HealthPolicy,
 )
 from AIClientCenter.core.result import APIResult
 
@@ -99,7 +99,8 @@ class OpenClawClient(BaseAIClient):
         thinking: Optional[str] = None,
         verbose: Optional[bool] = None,
         auto_reconnect: bool = True,
-        max_reconnect_attempts: int = 3
+        max_reconnect_attempts: int = 3,
+        health_policy: Optional[HealthPolicy] = None,
     ):
         """
         Initialize the OpenClaw client.
@@ -125,7 +126,8 @@ class OpenClawClient(BaseAIClient):
             api_token="openclaw-ws",
             priority=priority,
             group_id=group_id,
-            visibility=visibility
+            visibility=visibility,
+            health_policy=health_policy,
         )
 
         if not WEBSOCKET_AVAILABLE:

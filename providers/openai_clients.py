@@ -10,7 +10,7 @@ from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.services.token_rotator import RotatableClient
 from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 from AIClientCenter.core.manager import (
-    BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility,
+    BaseAIClient, CLIENT_PRIORITY_NORMAL, ClientStatus, ClientVisibility, HealthPolicy,
 )
 
 
@@ -40,6 +40,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             balance_config: dict = None,
             state_file_path: Optional[str] = None,
             budget_policy: Optional[BudgetPolicy] = None,
+            health_policy: Optional[HealthPolicy] = None,
     ):
         """
         Initialize the Standard Client.
@@ -67,6 +68,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             balance_config=balance_config,
             state_file_path=state_file_path,
             budget_policy=budget_policy,
+            health_policy=health_policy,
         )
 
         self.api = openai_api

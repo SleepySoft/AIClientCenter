@@ -40,7 +40,7 @@ from AIClientCenter.core.result import APIResult
 from AIClientCenter.core.metrics import ClientMetricsMixin
 from AIClientCenter.core.budget import BudgetPolicy
 from AIClientCenter.core.manager import (
-    BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL,
+    BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL, HealthPolicy,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,7 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
             balance_config: Optional[Dict[str, float]] = None,
             state_file_path: Optional[str] = None,
             budget_policy: Optional[BudgetPolicy] = None,
+            health_policy: Optional[HealthPolicy] = None,
             active_health_checks: bool = False,
             extra_env: Optional[Dict[str, str]] = None,
     ):
@@ -112,6 +113,7 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
             balance_config=balance_config,
             state_file_path=state_file_path,
             budget_policy=budget_policy,
+            health_policy=health_policy,
         )
 
         if mode == MODE_SESSION and not self.SUPPORTS_SESSION:
@@ -125,7 +127,7 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
         self.work_dir = work_dir or os.getcwd()
         self.mode = mode
         self.timeout = timeout
-        # Harness 自测本身会消耗套餐额度，默认仅靠真实请求和人工检查观测状态。
+        # 兼容旧配置；Manager 已不再执行周期探测，只有人工检查会发送测试请求。
         self.active_health_checks = active_health_checks
         self.extra_env = dict(extra_env or {})
 

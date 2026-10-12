@@ -10,7 +10,8 @@ from AIClientCenter.providers.zhipu import ZhipuSDKAdapter
 from AIClientCenter.providers.openai_clients import StandardOpenAIClient, \
     SelfRotatingOpenAIClient, OuterTokenRotatingOpenAIClient
 from AIClientCenter.core.manager import CLIENT_PRIORITY_EXPENSIVE, \
-    CLIENT_PRIORITY_FREEBIE, BaseAIClient, CLIENT_PRIORITY_NORMAL, CLIENT_PRIORITY_CONSUMABLES
+    CLIENT_PRIORITY_FREEBIE, BaseAIClient, CLIENT_PRIORITY_NORMAL, CLIENT_PRIORITY_CONSUMABLES, \
+    HealthPolicy
 from AIClientCenter.providers.openai_compatible import create_siliconflow_client, create_modelscope_client, \
     create_long_cat_client
 from AIClientCenter.services.token_rotator import SiliconFlowServiceRotator
@@ -23,6 +24,15 @@ from AIClientCenter.harness.cli import (
 
 
 def build_ai_clients() -> Dict[str, BaseAIClient]:
+    # Client 不会在启动或空闲时定期发送健康检查请求。连续瞬时失败后进入退避，
+    # 只有出现真实任务且退避到期时，才用该真实任务尝试恢复。
+    # 可在各 Client 构造器中按需传入：
+    # health_policy=HealthPolicy(
+    #     failure_threshold=2,
+    #     initial_backoff_sec=30,
+    #     max_backoff_sec=1800,
+    #     jitter_ratio=0.2,
+    # )
     # -------- The default silicon flow client --------
     # - Use high balance account's token
     # - It is considered available by default.
@@ -211,7 +221,7 @@ def build_ai_clients() -> Dict[str, BaseAIClient]:
 
     # ---------------- Agent CLI / Harness 配置 ----------------
     # Harness 认证由本机 CLI 处理，运行前请先在终端完成对应 CLI 的登录。
-    # 默认 active_health_checks=False，避免定期 "OK" 探测消耗套餐。
+    # Manager 已统一取消定期 "OK" 探测；active_health_checks 仅为旧配置兼容字段。
     # session 客户端只能串行使用；请给每个 session group 设置并发 1。
 
     # A. Codex：无状态模式。每篇情报独立进程，推荐用于普通新闻分析。

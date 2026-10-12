@@ -10,8 +10,9 @@ import socket
 import time
 import logging
 import datetime
-import traceback
 import threading
+import random
+from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
@@ -53,6 +54,35 @@ class ClientStatus(Enum):
         return cls.ERROR
 
 
+class CircuitState(Enum):
+    """按需恢复状态；与对外 ClientStatus 分离，避免把冷却误报成永久下线。"""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+    QUARANTINED = "quarantined"
+
+
+@dataclass(frozen=True)
+class HealthPolicy:
+    """无定时探测的 Client 故障恢复策略。"""
+
+    failure_threshold: int = 2
+    initial_backoff_sec: float = 30.0
+    max_backoff_sec: float = 1800.0
+    jitter_ratio: float = 0.2
+
+    def __post_init__(self):
+        if self.failure_threshold < 1:
+            raise ValueError("failure_threshold must be at least 1")
+        if self.initial_backoff_sec <= 0:
+            raise ValueError("initial_backoff_sec must be positive")
+        if self.max_backoff_sec < self.initial_backoff_sec:
+            raise ValueError("max_backoff_sec must be >= initial_backoff_sec")
+        if not 0 <= self.jitter_ratio <= 1:
+            raise ValueError("jitter_ratio must be between 0 and 1")
+
+
 class ClientVisibility(Enum):
     PUBLIC = "public"          # 正常参与自动分配
     PRIVATE = "private"        # 默认不参与，除非调用者允许/指定
@@ -85,7 +115,8 @@ class BaseAIClient(ABC):
                  priority: int = CLIENT_PRIORITY_NORMAL,
                  group_id: str = "default",
                  visibility: ClientVisibility = ClientVisibility.PUBLIC,
-                 budget_policy: Optional[BudgetPolicy] = None):
+                 budget_policy: Optional[BudgetPolicy] = None,
+                 health_policy: Optional[HealthPolicy] = None):
         """
         Initialize AI client with token and priority.
 
@@ -101,6 +132,9 @@ class BaseAIClient(ABC):
         self.visibility = visibility
         # 预算是调度附加信息，不是 Client 的可执行状态。默认未知额度且不阻断。
         self.budget_policy = budget_policy or BudgetPolicy()
+        self.health_policy = health_policy or HealthPolicy()
+        # 兼容旧配置字段；自动健康检查已改为完全按需，不再读取此值发起请求。
+        self.active_health_checks = False
 
         self.event_sink: Optional[ClientStateSQLiteLogger] = None
 
@@ -117,7 +151,12 @@ class BaseAIClient(ABC):
             'error_count': 0,
             'error_sum': 0,
             'in_use': False,
-            'acquired': False
+            'acquired': False,
+            'circuit_state': CircuitState.CLOSED,
+            'retry_not_before': 0.0,
+            'circuit_open_count': 0,
+            'last_failure_reason': None,
+            'recovery_trial_started': False,
         }
 
         self.test_prompt = "If you are working, please respond with 'OK'."
@@ -146,6 +185,31 @@ class BaseAIClient(ABC):
                 return {'error': 'client_unavailable', 'message': 'Client is marked as unavailable.'}
             if self._status['in_use']:
                 return {'error': 'client_busy', 'message': 'Client is busy (in use).'}
+            if not is_health_check:
+                circuit_state = self._status['circuit_state']
+                if circuit_state == CircuitState.QUARANTINED:
+                    return {
+                        'error': 'client_quarantined',
+                        'message': 'Client requires configuration change or manual recovery.'
+                    }
+                if circuit_state == CircuitState.OPEN:
+                    retry_not_before = self._status['retry_not_before']
+                    now = time.time()
+                    if now < retry_not_before:
+                        return {
+                            'error': 'client_cooldown',
+                            'retry_after': max(0.0, retry_not_before - now),
+                            'message': 'Client is cooling down after repeated failures.'
+                        }
+                    self._set_circuit_state_locked(CircuitState.HALF_OPEN)
+                    self._status['recovery_trial_started'] = True
+                elif circuit_state == CircuitState.HALF_OPEN:
+                    if self._status['recovery_trial_started']:
+                        return {
+                            'error': 'client_recovery_in_progress',
+                            'message': 'Another real request is validating this client.'
+                        }
+                    self._status['recovery_trial_started'] = True
             self._status['in_use'] = True
             self._status['chat_count'] += 1
 
@@ -217,6 +281,89 @@ class BaseAIClient(ABC):
         with self._lock:
             return self._status.get(key, None) if key else self._status.copy()
 
+    def _set_circuit_state_locked(self, state: CircuitState) -> None:
+        old_state = self._status['circuit_state']
+        self._status['circuit_state'] = state
+        if state != CircuitState.HALF_OPEN:
+            self._status['recovery_trial_started'] = False
+        if old_state != state:
+            self._emit_event({
+                "type": "circuit_change",
+                "ts": time.time(),
+                "client_name": self.name,
+                "old_state": old_state.value,
+                "new_state": state.value,
+                "retry_not_before": self._status['retry_not_before'],
+                "_client_obj": self,
+            })
+            logger.info("Client %s circuit changed from %s to %s",
+                        self.name, old_state.value, state.value)
+
+    def _record_transient_failure(self, reason: str = "transient_error",
+                                  retry_after_sec: Optional[float] = None) -> None:
+        """记录可恢复故障；达到阈值后只在真实需求到来时半开试运行。"""
+        self._increase_error_count()
+        self._update_client_status(ClientStatus.ERROR)
+        with self._lock:
+            self._status['last_failure_reason'] = str(reason)
+            error_count = self._status['error_count']
+            if error_count < self.health_policy.failure_threshold:
+                return
+            exponent = max(0, error_count - self.health_policy.failure_threshold)
+            delay = min(
+                self.health_policy.max_backoff_sec,
+                self.health_policy.initial_backoff_sec * (2 ** exponent),
+            )
+            if retry_after_sec is not None:
+                try:
+                    delay = max(delay, float(retry_after_sec))
+                except (TypeError, ValueError):
+                    pass
+            jitter = delay * self.health_policy.jitter_ratio
+            if jitter:
+                delay = max(0.1, delay + random.uniform(-jitter, jitter))
+            self._status['retry_not_before'] = time.time() + delay
+            self._status['circuit_open_count'] += 1
+            self._set_circuit_state_locked(CircuitState.OPEN)
+
+    def _mark_permanent_failure(self, reason: str = "permanent_error") -> None:
+        """永久错误进入隔离；不会被后台或时间流逝自动恢复。"""
+        self._increase_error_count()
+        with self._lock:
+            self._status['last_failure_reason'] = str(reason)
+            self._status['retry_not_before'] = 0.0
+        self._update_client_status(ClientStatus.UNAVAILABLE)
+
+    def _is_schedulable_for_demand(self, now: Optional[float] = None) -> bool:
+        """是否可承接真实请求；OPEN 只有退避到期后才返回 True。"""
+        with self._lock:
+            if self._status['status'] == ClientStatus.UNAVAILABLE:
+                return False
+            circuit_state = self._status['circuit_state']
+            if circuit_state in (CircuitState.QUARANTINED, CircuitState.HALF_OPEN):
+                return False
+            if circuit_state == CircuitState.OPEN:
+                return (time.time() if now is None else now) >= self._status['retry_not_before']
+            return True
+
+    def _recovery_delay(self, now: Optional[float] = None) -> Optional[float]:
+        """返回距离按需恢复窗口的秒数；非 OPEN 状态没有恢复计时。"""
+        with self._lock:
+            if self._status['circuit_state'] != CircuitState.OPEN:
+                return None
+            return max(0.0, self._status['retry_not_before'] - (
+                time.time() if now is None else now))
+
+    def _reserve_recovery_trial(self) -> bool:
+        """调度阶段预留唯一半开试运行；实际 chat 才会标记 started。"""
+        with self._lock:
+            if (self._status['circuit_state'] == CircuitState.OPEN
+                    and time.time() >= self._status['retry_not_before']):
+                self._set_circuit_state_locked(CircuitState.HALF_OPEN)
+                self._status['recovery_trial_started'] = False
+                return True
+            return False
+
     def validate_response(self, response: Dict[str, Any], expected_content: Optional[str] = None) -> Optional[str]:
         """
         Validates the content of the Chat response for business logic checks or health checks.
@@ -271,9 +418,7 @@ class BaseAIClient(ABC):
         """
         logger.warning(f"Client {self.name} received external complaint: {reason}")
 
-        # Increase error count and mark as ERROR/UNAVAILABLE based on severity (usually ERROR for external)
-        self._increase_error_count()
-        self._update_client_status(ClientStatus.ERROR)
+        self._record_transient_failure(reason)
 
     # =========================================================================
     # Metrics & Health Interface (Stubs)
@@ -390,6 +535,11 @@ class BaseAIClient(ABC):
         with self._lock:
             self._status['acquired'] = False
             self._status['last_released'] = time.time()
+            if (self._status['circuit_state'] == CircuitState.HALF_OPEN
+                    and not self._status['recovery_trial_started']):
+                # 已预留但调用方没有执行 chat；立即归还恢复资格，不把 Client 卡死。
+                self._status['retry_not_before'] = time.time()
+                self._set_circuit_state_locked(CircuitState.OPEN)
 
     def _is_acquired(self) -> bool:
         with self._lock:
@@ -453,6 +603,14 @@ class BaseAIClient(ABC):
             self._status['status'] = new_status
             self._status['status_last_updated'] = 0.0 if new_status == ClientStatus.UNKNOWN else time.time()
 
+            if new_status in (ClientStatus.AVAILABLE, ClientStatus.UNKNOWN):
+                self._status['retry_not_before'] = 0.0
+                self._status['last_failure_reason'] = None
+                self._set_circuit_state_locked(CircuitState.CLOSED)
+            elif new_status == ClientStatus.UNAVAILABLE:
+                self._status['retry_not_before'] = 0.0
+                self._set_circuit_state_locked(CircuitState.QUARANTINED)
+
             if old_status != new_status:
                 self._emit_event({
                     "type": "status_change",
@@ -497,14 +655,14 @@ class BaseAIClient(ABC):
                 # 动作: 记录日志，但【不要】把 Client 设为 UNAVAILABLE
                 logger.error(
                     f"Input/Param Error ({error_code}). Client {self.name} remains active. Message: {message[:100]}...")
-                # 这里不调用 _update_client_status，保持原样 (AVAILABLE)
-                # 也不增加错误计数 (因为不是 Client 的错)
+                # 请求已到达服务端，足以证明 Client 连通；若这是半开试运行则结束熔断。
+                self._reset_error_count()
+                self._update_client_status(ClientStatus.AVAILABLE)
 
             else:
                 # 情况 B: 账号废了、找不到资源等 (401, 403, 404)
                 # 动作: 这种情况下 Client 是真的不能用了
-                self._update_client_status(ClientStatus.UNAVAILABLE)
-                self._increase_error_count()  # 只有 Client 真的出错才计数
+                self._mark_permanent_failure(f"{error_code}: {message}")
                 logger.error(f"Permanent API Error ({error_code}): {message}")
 
         elif error_type == "BAD_REQUEST":
@@ -513,20 +671,22 @@ class BaseAIClient(ABC):
             error_category = 'fatal'
             logger.error(
                 f"Input/Param Error ({error_code}). Client {self.name} remains active. Message: {message[:100]}...")
+            self._reset_error_count()
+            self._update_client_status(ClientStatus.AVAILABLE)
 
         elif error_type in ["TRANSIENT_SERVER", "TRANSIENT_NETWORK"]:
             # 瞬时错误 (5xx, Network)
             error_category = 'recoverable'
-            # 动作: 暂时标记为 ERROR 或 UNAVAILABLE，等待恢复
-            self._update_client_status(ClientStatus.ERROR)
-            self._increase_error_count()
+            # 达到阈值后进入按需熔断，不发送额外健康检查。
+            retry_after = error.get('retry_after_sec', error.get('retry_after'))
+            self._record_transient_failure(
+                f"{error_code}: {message}", retry_after_sec=retry_after)
             logger.warning(f"Transient API Error ({error_code}): {message}")
 
         else:
             # 未知错误，保守处理
             error_category = 'recoverable'
-            self._update_client_status(ClientStatus.ERROR)
-            self._increase_error_count()
+            self._record_transient_failure(f"{error_type}/{error_code}: {message}")
             logger.error(f"Unknown API Error Type ({error_type}): {message}")
 
         return {
@@ -551,15 +711,13 @@ class BaseAIClient(ABC):
             # Parameter error or structure mismatch - potential programming error
             error_type = 'fatal'
             logger.error(f"Parameter error (fatal): {error_message}")
-            self._update_client_status(ClientStatus.UNAVAILABLE)  # Assume fatal if internal structure fails
+            self._mark_permanent_failure(error_message)
 
         else:
             # Other unknown exceptions
             error_type = 'recoverable'
             logger.error(f"Unexpected internal error: {error_message}")
-            self._update_client_status(ClientStatus.ERROR)
-
-        self._increase_error_count()
+            self._record_transient_failure(error_message)
 
         return {
             'error': 'internal_exception',
@@ -577,8 +735,7 @@ class BaseAIClient(ABC):
             choices = response.get('choices', [])
             if not choices:
                 # Protocol error: API claimed success but returned empty choices.
-                self._increase_error_count()
-                self._update_client_status(ClientStatus.ERROR)
+                self._record_transient_failure("empty_response")
                 return {
                     'error': 'empty_response',
                     'error_type': 'recoverable',
@@ -611,8 +768,7 @@ class BaseAIClient(ABC):
         except Exception as e:
             logger.error(f"Error processing LLM response: {e}")
             # Failure in the processing logic itself
-            self._increase_error_count()
-            self._update_client_status(ClientStatus.ERROR)
+            self._record_transient_failure(f"response_processing_error: {e}")
             return {
                 'error': 'response_processing_error',
                 'error_type': 'recoverable',
@@ -663,8 +819,8 @@ class AIClientManager:
         Initialize client manager.
 
         Args:
-            base_check_interval_sec: Base interval for health checks.
-            first_check_delay_sec: Delay before the first check loop starts.
+            base_check_interval_sec: 已弃用，仅为旧配置兼容保留。
+            first_check_delay_sec: 已弃用；启动时不再主动检查 Client。
         """
         self.clients = []  # List of BaseAIClient instances
 
@@ -680,10 +836,8 @@ class AIClientManager:
         self.monitor_thread = None
         self.monitor_running = False
 
-        # Configuration for the monitoring loop
-        self.reset_fatal_interval = base_check_interval_sec * 30    # Interval to reset fatal to unknown or re-check
-        self.check_error_interval = base_check_interval_sec         # Interval when client is in ERROR state
-        self.check_stable_interval = base_check_interval_sec * 15   # Interval when client is AVAILABLE
+        # 保留旧构造参数供外部配置平滑升级，但不得据此发起定时网络请求。
+        self.base_check_interval_sec = base_check_interval_sec
         self.first_check_delay_sec = first_check_delay_sec
 
         self.state_logger = state_logger
@@ -734,7 +888,38 @@ class AIClientManager:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return None
-                self._availability.wait(remaining)
+                recovery_delay = self._next_recovery_delay(**selection_kwargs)
+                wait_for = remaining
+                if recovery_delay is not None:
+                    # 避免 0 秒忙轮询；到期后重新选路并只放行一个真实请求。
+                    recovery_delay = max(0.01, recovery_delay)
+                    wait_for = recovery_delay if wait_for is None else min(wait_for, recovery_delay)
+                self._availability.wait(wait_for)
+
+    def _next_recovery_delay(self, target_group_id: str = None,
+                             target_client_name: str = None,
+                             allow_private: bool = False,
+                             **_: Any) -> Optional[float]:
+        """计算当前选择范围内最近的按需恢复窗口，不执行任何网络请求。"""
+        now = time.time()
+        delays = []
+        for client in self.clients:
+            if target_client_name and getattr(client, 'name', '') != target_client_name:
+                continue
+            if target_group_id and getattr(client, 'group_id', None) != target_group_id:
+                continue
+            visibility = getattr(client, 'visibility', ClientVisibility.PUBLIC)
+            if not target_client_name:
+                if visibility == ClientVisibility.NAME_ONLY:
+                    continue
+                if visibility == ClientVisibility.PRIVATE and not allow_private and not target_group_id:
+                    continue
+            if not client.get_budget_decision().allowed:
+                continue
+            delay = client._recovery_delay(now)
+            if delay is not None:
+                delays.append(delay)
+        return min(delays) if delays else None
 
     def notify_waiters(self) -> None:
         """唤醒客户端等待者，供停机或外部调度状态变化时使用。"""
@@ -748,6 +933,10 @@ class AIClientManager:
         with self._lock:
             group_counts: Dict[Optional[str], int] = {}
             for client in self.clients:
+                if not client._is_schedulable_for_demand():
+                    continue
+                if not client.get_budget_decision().allowed:
+                    continue
                 visibility = getattr(client, "visibility", None)
                 if visibility == ClientVisibility.NAME_ONLY:
                     continue
@@ -908,9 +1097,7 @@ class AIClientManager:
         client_status = client.get_status('status')
 
         # Runtime state and explicit budget policy are independent gates.
-        if client_status == ClientStatus.UNAVAILABLE:
-            return None
-        if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
+        if not client._is_schedulable_for_demand():
             return None
         budget_decision = client.get_budget_decision()
         if not budget_decision.allowed:
@@ -939,6 +1126,7 @@ class AIClientManager:
             return None
         if not client._acquire():
             return None
+        client._reserve_recovery_trial()
 
         # Switch from old client if exists
         if current_client:
@@ -983,11 +1171,7 @@ class AIClientManager:
                 continue
 
             # --- Standard Health Checks ---
-            if client_status == ClientStatus.UNAVAILABLE:
-                continue
-
-            # Error threshold check
-            if client_status == ClientStatus.ERROR and client.get_status('error_count') > 1:
+            if not client._is_schedulable_for_demand():
                 continue
 
             budget_decision = client.get_budget_decision()
@@ -1021,6 +1205,7 @@ class AIClientManager:
             if not client._is_busy():
                 # Attempt to acquire
                 if client._acquire():
+                    client._reserve_recovery_trial()
                     # Release old client if exists
                     if current_client:
                         self._release_client_core(current_client)
@@ -1054,7 +1239,9 @@ class AIClientManager:
         except Exception:
             pressure = 0.0
         # 只在同优先级 Client 之间按配额压力分流，不跨越整数优先级。
-        return getattr(client, 'priority', CLIENT_PRIORITY_NORMAL) + penalty + pressure * 0.01
+        runtime_penalty = 10000.0 if client.get_status('status') == ClientStatus.ERROR else 0.0
+        return (getattr(client, 'priority', CLIENT_PRIORITY_NORMAL)
+                + penalty + runtime_penalty + pressure * 0.01)
 
     def release_client(self, client: BaseAIClient | str):
         """
@@ -1100,7 +1287,9 @@ class AIClientManager:
 
             # 2. Categorize Clients
             # 使用 getattr 避免 AttributeError，如果没有 status 属性则默认 UNKNOWN
-            available_cnt = sum(1 for c in self.clients if c.get_status('status') == 'AVAILABLE')  # 假设是字符串或枚举
+            available_cnt = sum(
+                1 for c in self.clients if c._is_schedulable_for_demand(now)
+            )
             busy_cnt = sum(1 for c in self.clients if c._is_busy())
             error_cnt_clients = sum(1 for c in self.clients if c.get_status('error_count') > 0)
 
@@ -1146,6 +1335,12 @@ class AIClientManager:
                     },
                     "state": {
                         "status": client.get_status('status'),
+                        "circuit_state": getattr(
+                            raw_status.get('circuit_state', CircuitState.CLOSED),
+                            'value', str(raw_status.get('circuit_state', CircuitState.CLOSED)),
+                        ),
+                        "retry_not_before": raw_status.get('retry_not_before', 0.0),
+                        "last_failure_reason": raw_status.get('last_failure_reason'),
                         "is_busy": client._is_busy(),
                         "health_score": health_score,
                         "last_active_ts": raw_status.get('status_last_updated', 0.0),
@@ -1166,6 +1361,7 @@ class AIClientManager:
                         "chat_count": chat_count,
                         "error_count": err_count,
                         "error_sum": err_sum,
+                        "circuit_open_count": raw_status.get('circuit_open_count', 0),
                         "error_rate_percent": round(err_rate, 1),
                         "last_chat_ts": raw_status.get('last_chat', 0),
                     },
@@ -1220,6 +1416,7 @@ class AIClientManager:
                 # 注销临时用户
                 self._clear_test_user(client)
                 client._release()
+                self.notify_waiters()
         else:
             logger.warning(f"Could not acquire lock for {client_name} manual check")
             return False
@@ -1233,7 +1430,7 @@ class AIClientManager:
             return False
 
         client._update_client_status(status)
-        if status == ClientStatus.AVAILABLE:
+        if status in (ClientStatus.AVAILABLE, ClientStatus.UNKNOWN):
             client._reset_error_count()
             self.notify_waiters()
         return True
@@ -1329,20 +1526,18 @@ class AIClientManager:
         return "\n".join(lines)
 
     def start_monitoring(self):
-        """Start background monitoring of client health."""
+        """启用状态观测；按需健康策略不会创建定时探测线程。"""
         if self.monitor_running:
             return
 
         self.monitor_running = True
-        self.monitor_thread = threading.Thread(name='AIClientManager Monitoring', target=self._monitor_loop, daemon=True)
-        self.monitor_thread.start()
-        logger.info("Started AI client monitoring")
+        self.monitor_thread = None
+        logger.info("AI client monitoring enabled in demand-driven mode (no periodic probes)")
 
     def stop_monitoring(self):
         """Stop background monitoring."""
         self.monitor_running = False
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=10)
+        self.notify_waiters()
 
         try:
             self.state_logger.stop()
@@ -1352,31 +1547,8 @@ class AIClientManager:
         logger.info("Stopped AI client monitoring")
 
     def _monitor_loop(self):
-        """Background monitoring loop."""
-        logger.info("Monitor loop started.")
-        while self.monitor_running:
-            # Initial startup delay
-            if self.first_check_delay_sec > 0:
-                self.first_check_delay_sec -= 1
-                time.sleep(1)
-                continue
-
-            try:
-                # Temporary add delay
-                time.sleep(60)
-                self._check_client_health()
-                # - Do not clean up the unavailable clients.
-                # - Because the limit will be reset by time or by changing token.
-                # self._cleanup_unavailable_clients()
-                # - Optional: Auto-release idle clients held by users for too long?
-                # self._cleanup_idle_user_sessions()
-            except Exception as e:
-                # Prevent monitor thread from crashing entirely
-                print(traceback.format_exc())
-                logger.error(f"Error in monitor loop: {e}")
-
-            # Sleep with a small deviation to avoid thundering herd if multiple managers exist
-            time.sleep(self.check_error_interval)
+        """旧入口保留为空操作；自动探测已由真实业务请求取代。"""
+        logger.debug("Periodic AI client monitor loop is disabled")
 
     def _generate_test_user_name(self, client: BaseAIClient) -> str:
         """生成一个用于显示的测试者名称，包含Client名以防字典Key冲突"""
@@ -1401,78 +1573,9 @@ class AIClientManager:
                 del self.user_client_map[test_user]
 
     def _check_client_health(self):
-        """
-        Trigger active health checks for eligible clients using dynamic intervals,
-        based on the last successful/unsuccessful chat activity.
-        """
-        clients_to_check = []
-        now = time.time()
-
-        with self._lock:
-            for client in self.clients:
-                if not getattr(client, 'active_health_checks', True):
-                    continue
-                client_status = client.get_status('status')
-
-                # --- 关键修改 1: 使用最近的活动时间 ---
-                # last_chat: 上一次用户请求时间 (无论成功失败，都已更新状态)
-                # last_test: 上一次系统主动测试时间
-                t_last_activity = max(client.get_status('last_chat'), client.get_status('last_test'))
-                # ------------------------------------
-
-                # 1. 动态计算检查间隔 (Timeout)
-                client_error_count = client.get_status('error_count')
-                base_timeout = self.check_error_interval
-
-                if client_status == ClientStatus.AVAILABLE:
-                    # 稳定 Client：使用长间隔
-                    timeout = self.check_stable_interval
-                elif client_status == ClientStatus.UNAVAILABLE:
-                    # 永久不可用：超长间隔 (e.g., 30x)
-                    timeout = self.reset_fatal_interval
-                elif client_status == ClientStatus.UNKNOWN:
-                    # 首次检查：立即检查
-                    timeout = 0
-                else:  # ClientStatus.ERROR
-                    # 瞬时错误：使用指数退避，避免连续失败时过度检查
-                    exponent = min(client_error_count, 4)
-                    timeout = base_timeout * (2 ** exponent)
-
-                # 2. 检查是否达到 timeout
-                # 如果 t_last_activity 是 0.0 (UNKNOWN 状态)，则现在 - 0 > 0 (timeout) 也会触发
-                if now - t_last_activity > timeout:
-
-                    # 3. 避免检查正在被用户使用的 Client
-                    if not client._is_acquired():
-                        clients_to_check.append(client)
-                    else:
-                        logger.debug(f"Skipping health check for {client.name} (Acquired by user).")
-
-        # Perform checks outside the main lock to avoid blocking get_available_client
-        for client in clients_to_check:
-            client_name = getattr(client, 'name', 'Unknown Client')
-            logger.debug(f'Checking connectivity for {client_name}...')
-
-            # This method usually pings the API or checks simple connectivity
-            if client._acquire(force=True):
-                try:
-                    # 标记为系统正在使用，让 Dashboard 能显示 "[System Check] ..."
-                    self._set_test_user(client)
-
-                    # 执行原有的测试逻辑
-                    result = client._test_and_update_status()
-
-                    if not result:
-                        logger.error(f"Status check - {client_name}: Unknown error.")
-                except Exception as e:
-                    logger.error(f"Exception during health check for {client_name}: {e}")
-                finally:
-                    # [测试结束，移除系统用户
-                    self._clear_test_user(client)
-                    client._release()
-            else:
-                # 如果获取不到锁，说明正被真实用户使用，跳过本次检查
-                logger.debug(f"Status check - Cannot acquire {client_name} (Busy).")
+        """兼容旧调用：自动检查不再执行网络请求。"""
+        logger.debug("Skipped periodic client health check; recovery is demand-driven")
+        return 0
 
     def _cleanup_unavailable_clients(self):
         """
