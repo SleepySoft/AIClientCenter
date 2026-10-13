@@ -12,6 +12,8 @@ import logging
 import datetime
 import threading
 import random
+import json
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
@@ -20,6 +22,7 @@ from typing import Optional, Dict, Any, List
 from AIClientCenter.core.result import APIResult
 from AIClientCenter.core.state_logger import ClientStateSQLiteLogger
 from AIClientCenter.core.budget import BudgetDecision, BudgetPolicy
+from AIClientCenter.core.rate_limit import estimate_message_tokens, estimate_text_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,56 @@ CLIENT_PRIORITY_LOWER = 5
 
 CLIENT_PRIORITY_MORE_PRECIOUS = CLIENT_PRIORITY_LOWER
 CLIENT_PRIORITY_LESS_PRECIOUS = CLIENT_PRIORITY_HIGHER
+
+
+def _json_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), default=str,
+        ).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _optional_usage_int(usage: Dict[str, Any], *names: str) -> Optional[int]:
+    for name in names:
+        if name not in usage:
+            continue
+        try:
+            return max(0, int(usage[name]))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _response_observation(response: Any) -> Dict[str, Any]:
+    if not isinstance(response, dict):
+        return {
+            "logical_output_bytes": _json_bytes(response),
+            "estimated_output_tokens": estimate_text_tokens(response),
+            "token_source": "estimated",
+        }
+    choices = response.get("choices") or []
+    first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    reported_input = _optional_usage_int(usage, "prompt_tokens", "input_tokens")
+    reported_output = _optional_usage_int(usage, "completion_tokens", "output_tokens")
+    reported_total = _optional_usage_int(usage, "total_tokens")
+    reported = any(
+        value is not None
+        for value in (reported_input, reported_output, reported_total)
+    )
+    return {
+        "logical_output_bytes": _json_bytes(response),
+        "estimated_output_tokens": estimate_text_tokens(content),
+        "reported_input_tokens": reported_input,
+        "reported_output_tokens": reported_output,
+        "reported_total_tokens": reported_total,
+        "token_source": "reported" if reported else "estimated",
+        "finish_reason": first_choice.get("finish_reason"),
+    }
 
 
 # 设置全局默认 Socket 超时
@@ -116,7 +169,8 @@ class BaseAIClient(ABC):
                  group_id: str = "default",
                  visibility: ClientVisibility = ClientVisibility.PUBLIC,
                  budget_policy: Optional[BudgetPolicy] = None,
-                 health_policy: Optional[HealthPolicy] = None):
+                 health_policy: Optional[HealthPolicy] = None,
+                 observation_context: Optional[Dict[str, Any]] = None):
         """
         Initialize AI client with token and priority.
 
@@ -137,6 +191,11 @@ class BaseAIClient(ABC):
         self.active_health_checks = False
 
         self.event_sink: Optional[ClientStateSQLiteLogger] = None
+        self._event_sinks = []
+        self.observation_context = {
+            str(key): value for key, value in (observation_context or {}).items()
+            if value is not None
+        }
 
         self._lock = threading.RLock()
         self._status = {
@@ -214,11 +273,22 @@ class BaseAIClient(ABC):
             self._status['chat_count'] += 1
 
         start_ts = time.time()
+        request_id = uuid.uuid4().hex
         chosen_model = model or (self.get_current_model() if hasattr(self, "get_current_model") else None)
+        logical_input_bytes = _json_bytes({
+            "model": chosen_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        })
+        estimated_input_tokens = estimate_message_tokens(messages)
+        response_data = None
+        response_metrics = None
 
         self._emit_event({
             "type": "chat_start",
             "ts": start_ts,
+            "request_id": request_id,
             "client_name": self.name,
             "model": chosen_model,
             "is_health_check": bool(is_health_check),
@@ -237,7 +307,11 @@ class BaseAIClient(ABC):
             if result.get('success', False):
                 final_success = True
                 # result['data'] is the LLM response JSON
-                return self._handle_llm_response(result['data'], messages)
+                response_data = result['data']
+                response_metrics = _response_observation(response_data)
+                if isinstance(response_data, dict):
+                    response_data.setdefault("_ai_client_meta", {})["request_id"] = request_id
+                return self._handle_llm_response(response_data, messages)
 
             # 2. Failed response (error reported by API_CORE)
             error_data = result.get('error')
@@ -265,15 +339,34 @@ class BaseAIClient(ABC):
                 self._status['last_chat'] = time.time()
 
             end_ts = time.time()
+            if response_metrics is None:
+                response_metrics = _response_observation(response_data)
+            if response_data is None and final_error is not None:
+                response_metrics["logical_output_bytes"] = _json_bytes(final_error)
+            observed_model = (
+                response_data.get("model")
+                if isinstance(response_data, dict) and response_data.get("model")
+                else model or (
+                    self.get_current_model()
+                    if hasattr(self, "get_current_model") else chosen_model
+                )
+            )
 
             self._emit_event({
                 "type": "chat_end",
                 "ts": end_ts,
+                "started_at": start_ts,
+                "elapsed_ms": (end_ts - start_ts) * 1000.0,
+                "request_id": request_id,
                 "client_name": self.name,
-                "model": chosen_model,
+                "model": observed_model,
+                "group_id": self.group_id,
                 "is_health_check": bool(is_health_check),
                 "success": bool(final_success),
                 "error": final_error,  # may be None or dict
+                "logical_input_bytes": logical_input_bytes,
+                "estimated_input_tokens": estimated_input_tokens,
+                **response_metrics,
                 "_client_obj": self,
             })
 
@@ -503,8 +596,24 @@ class BaseAIClient(ABC):
     # ---------------------------------------- Not for user ----------------------------------------
 
     def set_event_sink(self, sink_callable):
-        """Inject an external event sink: sink(event_dict) -> None."""
+        """兼容接口：替换当前所有事件订阅者。"""
         self.event_sink = sink_callable
+        self._event_sinks = [sink_callable] if callable(sink_callable) else []
+
+    def add_event_sink(self, sink_callable):
+        """追加事件订阅者，使状态日志和调用观测可以同时工作。"""
+        if not callable(sink_callable):
+            raise TypeError("event sink 必须可调用")
+        if sink_callable not in self._event_sinks:
+            self._event_sinks.append(sink_callable)
+        if self.event_sink is None:
+            self.event_sink = sink_callable
+
+    def set_observation_context(self, **context: Any) -> None:
+        """设置不含凭据的通用观测标签。"""
+        self.observation_context.update({
+            str(key): value for key, value in context.items() if value is not None
+        })
 
     def _is_busy(self) -> bool:
         """Check if client is currently in use."""
@@ -625,11 +734,15 @@ class BaseAIClient(ABC):
 
     def _emit_event(self, event: Dict[str, Any]):
         """Best-effort event emission; never break core logic."""
-        try:
-            if callable(self.event_sink):
-                self.event_sink(event)
-        except Exception:
-            pass
+        payload = {**self.observation_context, **event}
+        sinks = list(self._event_sinks)
+        if not sinks and callable(self.event_sink):
+            sinks = [self.event_sink]
+        for sink in sinks:
+            try:
+                sink(payload)
+            except Exception:
+                pass
 
     # ---------------------------------------- Error Handling (Unified) ----------------------------------------
 
@@ -814,7 +927,8 @@ class AIClientManager:
     health monitoring, and automatic client management.
     """
 
-    def __init__(self, base_check_interval_sec: int = 60, first_check_delay_sec: int = 10, state_logger=None):
+    def __init__(self, base_check_interval_sec: int = 60, first_check_delay_sec: int = 10,
+                 state_logger=None, call_observer=None):
         """
         Initialize client manager.
 
@@ -841,6 +955,7 @@ class AIClientManager:
         self.first_check_delay_sec = first_check_delay_sec
 
         self.state_logger = state_logger
+        self.call_observer = call_observer
 
     def register_client(self, client: Any):
         """
@@ -855,6 +970,11 @@ class AIClientManager:
             try:
                 if self.state_logger:
                     self.state_logger.attach_client(client)
+            except Exception:
+                pass
+            try:
+                if self.call_observer:
+                    self.call_observer.attach_client(client)
             except Exception:
                 pass
 
@@ -1438,6 +1558,10 @@ class AIClientManager:
     def get_state_logger(self):
         """Expose state logger for dashboard and external integrations."""
         return getattr(self, "state_logger", None)
+
+    def get_call_observer(self):
+        """Expose the optional generic call observer."""
+        return getattr(self, "call_observer", None)
 
     @staticmethod
     def format_stats_report(stats_data: Dict[str, Any]) -> str:

@@ -94,6 +94,13 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 余额及用量统计的兼容 mixin。额度信息通过 BudgetPolicy 单独参与调度，
 > 不再等同于 Client 的运行时健康度。
 
+[core/observation.py](core/observation.py)
+
+> 通用调用观测器。每次真实调用只记录服务商、模型、账号别名、结果、耗时、逻辑字节数、
+> 估算/实报 Token 等元数据，不保存 Prompt 和回复正文。数据追加到 SQLite，可按时间、
+> 服务商、模型、账号或 Client 切片汇总。上层可选用 `feedback(request_id, valid=...,
+> score=..., labels=...)` 回填通用质量信息；AIClientCenter 不依赖任何业务 Schema。
+
 [core/budget.py](core/budget.py)
 
 > 本地预算策略：unknown、observed、soft_limit、hard_limit。适用于 API、

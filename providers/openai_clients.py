@@ -41,6 +41,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             state_file_path: Optional[str] = None,
             budget_policy: Optional[BudgetPolicy] = None,
             health_policy: Optional[HealthPolicy] = None,
+            observation_context: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the Standard Client.
@@ -69,6 +70,7 @@ class StandardOpenAIClient(ClientMetricsMixin, BaseAIClient):
             state_file_path=state_file_path,
             budget_policy=budget_policy,
             health_policy=health_policy,
+            observation_context=observation_context,
         )
 
         self.api = openai_api

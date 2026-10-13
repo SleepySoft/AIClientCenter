@@ -120,6 +120,11 @@ def build_groq_clients(
                 priority=CLIENT_PRIORITY_FREEBIE,
                 group_id=GROQ_GROUP_ID,
                 default_available=True,
+                observation_context={
+                    "provider": "groq",
+                    "account_alias": credential.alias,
+                    "preset": "groq_free",
+                },
             )
     return clients
 

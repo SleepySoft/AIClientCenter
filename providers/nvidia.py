@@ -134,6 +134,11 @@ def build_nvidia_clients(
                 priority=spec.priority,
                 group_id=group_id,
                 default_available=True,
+                observation_context={
+                    "provider": "nvidia",
+                    "account_alias": credential.alias,
+                    "preset": "nvidia_free",
+                },
             )
     return clients
 

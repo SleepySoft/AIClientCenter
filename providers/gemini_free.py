@@ -139,6 +139,11 @@ def build_gemini_free_clients(
                     priority=priorities[spec.tier],
                     group_id=GEMINI_FREE_GROUP_ID,
                     default_available=True,
+                    observation_context={
+                        "provider": "gemini",
+                        "account_alias": credential.alias,
+                        "preset": "gemini_free",
+                    },
                 )
     return clients
 

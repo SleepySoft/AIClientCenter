@@ -81,7 +81,9 @@ class ClientStateSQLiteLogger:
         Attach event sink to a client object (BaseAIClient) without coupling to client implementation.
         The client must implement set_event_sink(callable).
         """
-        if hasattr(client_obj, "set_event_sink"):
+        if hasattr(client_obj, "add_event_sink"):
+            client_obj.add_event_sink(self.handle_event)
+        elif hasattr(client_obj, "set_event_sink"):
             client_obj.set_event_sink(self.handle_event)
 
         # Create an initial idle interval for timeline baseline
