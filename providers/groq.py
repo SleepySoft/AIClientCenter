@@ -9,6 +9,7 @@ from typing import Optional
 
 from AIClientCenter.core.credentials import APIKeyConfig, resolve_api_keys
 from AIClientCenter.core.manager import BaseAIClient, CLIENT_PRIORITY_FREEBIE
+from AIClientCenter.core.preset import ClientPreset
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
 from AIClientCenter.providers.openai_compatible import create_groq_client
@@ -121,3 +122,11 @@ def build_groq_clients(
                 default_available=True,
             )
     return clients
+
+
+def groq_free(api_keys: APIKeyConfig = None, **kwargs) -> ClientPreset:
+    """返回可直接组合的 Groq 免费层推荐预置。"""
+
+    clients = build_groq_clients(api_keys=api_keys, **kwargs)
+    limits = {GROQ_GROUP_ID: len(clients)} if clients else {}
+    return ClientPreset(clients, limits)

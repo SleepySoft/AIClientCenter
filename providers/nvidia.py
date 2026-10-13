@@ -13,6 +13,7 @@ from AIClientCenter.core.manager import (
     CLIENT_PRIORITY_CONSUMABLES,
     CLIENT_PRIORITY_FREEBIE,
 )
+from AIClientCenter.core.preset import ClientPreset
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
 from AIClientCenter.providers.openai_compatible import create_nvidia_client
@@ -145,3 +146,10 @@ def nvidia_group_limits(clients: dict[str, BaseAIClient]) -> dict[str, int]:
         for client in clients.values()
         if client.group_id.startswith(NVIDIA_GROUP_PREFIX)
     }
+
+
+def nvidia_free(api_keys: APIKeyConfig = None, **kwargs) -> ClientPreset:
+    """返回可直接组合的 NVIDIA 免费原型端点推荐预置。"""
+
+    clients = build_nvidia_clients(api_keys, **kwargs)
+    return ClientPreset(clients, nvidia_group_limits(clients))

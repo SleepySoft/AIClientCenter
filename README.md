@@ -105,6 +105,12 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 声明多个独立额度；客户端名只显示别名，SQLite 限额账本使用不可逆指纹隔离额度，
 > 不记录明文 Key。空映射会兼容回退到服务商原有的单 Key 环境变量。
 
+[presets.py](presets.py)
+
+> Python 配置文件的简化入口。`gemini_free()`、`groq_free()`、`nvidia_free()` 各自
+> 封装推荐模型、限额和并发策略，`compose_presets()` 负责无覆盖地组合结果。主配置只需
+> 传入 Key；普通付费 Client 仍可直接构造，不需要套用免费预置。
+
 [services/token_rotator.py](services/token_rotator.py)
 
 > 批量Token管理及自动轮转功能。
