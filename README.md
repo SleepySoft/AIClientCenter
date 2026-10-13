@@ -50,7 +50,13 @@ Harness CLI 路径，不会自动发送模型请求。首次找不到该文件�
     # 启动仅本机可访问的管理与手动对话页
     python -m AIClientCenter --port 8000
 
-启动后访问 http://127.0.0.1:8000/playground，选择已注册的 client 后可手动
+启动后访问 http://127.0.0.1:8000/observations 查看调用次数、成功率、Token、逻辑
+流量、耗时、质量反馈覆盖率，以及按服务商、模型、账号或 Client 的切片排行。页面只查
+本地 SQLite，不会触发模型请求，也不会自动高频刷新。独立入口默认把记录写入
+`AIClientCenter/_data/ai_client_observations.db`；可用 `--observation-db` 修改路径，或用
+`--disable-observation` 关闭。
+
+访问 http://127.0.0.1:8000/playground，选择已注册的 client 后可手动
 发送 system/user prompt。调用仍会经过 AIClientManager 的并发和预算策略，因而
 可能消耗 API 或 Harness 套餐额度。非本机监听必须显式加 --allow-remote，并自行
 提供访问控制；也可传入 --disable-manual-calls 禁用真实调用。

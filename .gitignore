@@ -204,6 +204,9 @@ cython_debug/
 # 本机 AI Client 凭证与配置；从 config/example.py 复制生成。
 config/config.py
 
+# 独立 Launcher 的本地运行数据。
+_data/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

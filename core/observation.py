@@ -246,6 +246,9 @@ class CallObservationSQLiteLogger:
                 SUM(COALESCE(reported_output_tokens, estimated_output_tokens, 0))
                     AS output_tokens,
                 AVG(elapsed_ms) AS average_elapsed_ms,
+                SUM(CASE WHEN token_source = 'reported' THEN 1 ELSE 0 END)
+                    AS reported_token_calls,
+                SUM(is_health_check) AS health_check_count,
                 SUM(CASE WHEN feedback_valid IS NOT NULL THEN 1 ELSE 0 END)
                     AS feedback_count,
                 SUM(COALESCE(feedback_valid, 0)) AS feedback_valid_count,

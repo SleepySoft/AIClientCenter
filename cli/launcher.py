@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from AIClientCenter.core.manager import AIClientManager, BaseAIClient  # noqa: E402
+from AIClientCenter.core.observation import CallObservationSQLiteLogger  # noqa: E402
 from AIClientCenter.web.dashboard import AIDashboardService  # noqa: E402
 
 
@@ -130,9 +131,10 @@ def validate_config(clients: Dict[str, BaseAIClient],
 
 
 def build_manager(clients: Dict[str, BaseAIClient],
-                  group_limits: Dict[str, int]) -> AIClientManager:
+                  group_limits: Dict[str, int],
+                  call_observer=None) -> AIClientManager:
     """把已验证的配置组装为独立运行的 manager。"""
-    manager = AIClientManager()
+    manager = AIClientManager(call_observer=call_observer)
     for client in clients.values():
         manager.register_client(client)
     for group_id, limit in group_limits.items():
@@ -159,6 +161,15 @@ def parse_args(argv=None):
                         help="允许非本机监听地址；手动调用页会消耗额度，请自行做好访问控制。")
     parser.add_argument("--disable-manual-calls", action="store_true",
                         help="只启动监控页，禁用手动对话 API。")
+    parser.add_argument(
+        "--observation-db", type=Path,
+        default=PACKAGE_ROOT / "_data" / "ai_client_observations.db",
+        help="调用观测 SQLite 路径。",
+    )
+    parser.add_argument("--observation-retention-days", type=int, default=90,
+                        help="调用观测保留天数，默认 90。")
+    parser.add_argument("--disable-observation", action="store_true",
+                        help="禁用调用观测及统计页面数据。")
     return parser.parse_args(argv)
 
 
@@ -170,6 +181,9 @@ def main(argv=None) -> int:
         return 2
     if args.host not in {"127.0.0.1", "localhost", "::1"} and not args.allow_remote:
         print("错误：非本机监听必须显式传入 --allow-remote。", file=sys.stderr)
+        return 2
+    if args.observation_retention_days < 1:
+        print("错误：observation-retention-days 必须为正整数。", file=sys.stderr)
         return 2
 
     try:
@@ -193,7 +207,13 @@ def main(argv=None) -> int:
     if args.validate_only:
         return 0
 
-    manager = build_manager(clients, group_limits)
+    call_observer = None
+    if not args.disable_observation:
+        call_observer = CallObservationSQLiteLogger(
+            str(args.observation_db),
+            retention_days=args.observation_retention_days,
+        )
+    manager = build_manager(clients, group_limits, call_observer=call_observer)
     manager.start_monitoring()
     dashboard = AIDashboardService(manager, enable_manual_calls=not args.disable_manual_calls)
     try:

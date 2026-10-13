@@ -11,6 +11,7 @@ from AIClientCenter.core.metrics import ClientMetricsMixin
 from AIClientCenter.core.manager import (
     AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL,
 )
+from AIClientCenter.web.observation_page import OBSERVATION_HTML
 
 
 logger = logging.getLogger("AIDashboard")
@@ -52,6 +53,9 @@ FRONTEND_HTML = r"""
           </button>
           <button onclick="window.location.href='timeline'" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
             <i class="fa-solid fa-chart-gantt mr-1"></i> Timeline
+          </button>
+          <button onclick="window.location.href='observations'" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
+            <i class="fa-solid fa-chart-column mr-1"></i> Usage
           </button>
           <button onclick="window.location.href='playground'" class="px-4 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700 text-sm">
             <i class="fa-solid fa-flask mr-1"></i> Manual Call
@@ -1692,6 +1696,72 @@ class AIDashboardService:
         def timeline_view():
             """Serve embedded Timeline page."""
             return Response(FRONTEND_TIMELINE_HTML, mimetype='text/html')
+
+        @bp.route('/observations', methods=['GET'])
+        @maybe_wrap
+        def observations_view():
+            """Serve the generic call observation page."""
+            return Response(OBSERVATION_HTML, mimetype='text/html')
+
+        @bp.route('/api/observations', methods=['GET'])
+        @maybe_wrap
+        def api_observations():
+            """Return a bounded, content-free observation dashboard payload."""
+            observer = (
+                self.manager.get_call_observer()
+                if hasattr(self.manager, "get_call_observer") else None
+            )
+            if not observer:
+                return jsonify({
+                    "enabled": False,
+                    "overall": {}, "series": [], "breakdown": [], "recent": [],
+                })
+
+            try:
+                hours = float(request.args.get("hours", 24))
+                limit = int(request.args.get("limit", 40))
+            except (TypeError, ValueError):
+                return jsonify({"error": "hours or limit is invalid"}), 400
+            if not 1 <= hours <= 24 * 90:
+                return jsonify({"error": "hours must be within 1..2160"}), 400
+            if not 1 <= limit <= 200:
+                return jsonify({"error": "limit must be within 1..200"}), 400
+
+            dimension = str(request.args.get("dimension", "model"))
+            allowed_dimensions = {
+                "provider", "model", "client_name", "account_alias", "group_id",
+            }
+            if dimension not in allowed_dimensions:
+                return jsonify({"error": "unsupported dimension"}), 400
+
+            until_ts = time.time()
+            since_ts = until_ts - hours * 3600
+            bucket = "hour" if hours <= 72 else "day"
+            try:
+                overall_rows = observer.summarize(
+                    since_ts=since_ts, until_ts=until_ts, group_by=(),
+                )
+                series = observer.summarize(
+                    since_ts=since_ts, until_ts=until_ts,
+                    group_by=(), time_bucket=bucket,
+                )
+                series.sort(key=lambda item: item.get("time_bucket") or "")
+                return jsonify({
+                    "enabled": True,
+                    "range": {"since_ts": since_ts, "until_ts": until_ts, "hours": hours},
+                    "overall": overall_rows[0] if overall_rows else {},
+                    "series": series,
+                    "breakdown": observer.summarize(
+                        since_ts=since_ts, until_ts=until_ts,
+                        group_by=(dimension,),
+                    ),
+                    "recent": observer.query_calls(
+                        since_ts=since_ts, until_ts=until_ts, limit=limit,
+                    ),
+                })
+            except Exception as exc:
+                logger.exception("Failed to query AI call observations")
+                return jsonify({"error": str(exc)}), 500
 
         @bp.route('/api/clients/<client_name>/check', methods=['POST'])
         @maybe_wrap

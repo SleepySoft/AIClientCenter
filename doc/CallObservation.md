@@ -15,6 +15,11 @@ observer = CallObservationSQLiteLogger(
 manager = AIClientManager(call_observer=observer)
 ```
 
+当 Manager 挂载 `AIDashboardService` 后，可通过其 `/observations` 页面查看总览、趋势、
+切片排行和最近调用。该页面只读取本地 SQLite；首次打开及手动刷新时查询，不主动探测
+Client，也不产生模型请求。独立 Launcher 默认启用并写入
+`AIClientCenter/_data/ai_client_observations.db`。
+
 推荐预置会自动填写 `provider` 和 `account_alias`。自行构造的付费 Client 可显式设置：
 
 ```python
