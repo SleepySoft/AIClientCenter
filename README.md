@@ -139,6 +139,13 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > `GROQ_COMPLETION_RESERVE_TOKENS` 调整保守程度。限额以
 > [Groq Rate Limits](https://console.groq.com/docs/rate-limits) 和账号 Limits 页面为准。
 
+[providers/nvidia.py](providers/nvidia.py)
+
+> NVIDIA Build 免费原型端点配置。每个账号可直接配置一个 Key；账号内多个候选模型
+> 共享同一份保守 RPM 账本和单并发组，不同账号相互独立。默认启用 Nemotron 3 Ultra、
+> GLM-5.3 和 Kimi K3；由于 NVIDIA 免费限流会随模型和平台负载动态变化，默认只按
+> 账号页面常见的 40 RPM 上限使用 60%，远端 429 仍交给按需熔断处理。
+
 [harness/cli.py](harness/cli.py)
 
 > 基于本机命令行 AI Agent（Codex CLI / Kimi CLI）的客户端实现。
