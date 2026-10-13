@@ -160,6 +160,19 @@ class RateLimitedOpenAIClient(StandardOpenAIClient):
             return decision
         return BudgetDecision(False, 0.0, "estimated_rate_limit_reached")
 
+    @override
+    def can_accept_workload(
+            self, *, estimated_input_tokens: Optional[int] = None,
+            max_tokens: Optional[int] = None,
+    ) -> bool:
+        """使用本次请求的估算规模预检，避免调度后才被本地限额拒绝。"""
+        estimate = max(1, int(estimated_input_tokens or 1))
+        if self.completion_reserve_tokens:
+            estimate += min(
+                max(0, int(max_tokens or 0)), self.completion_reserve_tokens,
+            )
+        return self.rate_limiter.can_accept(estimate)
+
     def get_scheduling_pressure(self) -> float:
         return float(self.rate_limiter.snapshot()["pressure"])
 

@@ -119,6 +119,37 @@ def test_manager_stats_expose_estimated_rate_limit_snapshot():
     manager.stop_monitoring()
 
 
+def test_manager_skips_rate_limited_client_that_cannot_fit_workload():
+    too_small = RateLimitedOpenAIClient(
+        name="too-small",
+        openai_api=FakeAPI(),
+        rate_limiter=EstimatedRateLimiter(tpm=100, utilization_ratio=1),
+        completion_reserve_tokens=20,
+        priority=1,
+        default_available=True,
+    )
+    fits = RateLimitedOpenAIClient(
+        name="fits",
+        openai_api=FakeAPI(),
+        rate_limiter=EstimatedRateLimiter(tpm=1000, utilization_ratio=1),
+        completion_reserve_tokens=20,
+        priority=2,
+        default_available=True,
+    )
+    manager = AIClientManager(first_check_delay_sec=9999)
+    manager.register_client(too_small)
+    manager.register_client(fits)
+
+    selected = manager.get_available_client(
+        "large-request", estimated_input_tokens=90, max_tokens=50,
+    )
+
+    assert selected is fits
+    assert too_small.get_status("acquire_count") == 0
+    manager.release_client("large-request")
+    manager.stop_monitoring()
+
+
 def test_sqlite_ledger_survives_limiter_restart(tmp_path):
     clock = FakeClock()
     database = tmp_path / "rate_limits.sqlite3"

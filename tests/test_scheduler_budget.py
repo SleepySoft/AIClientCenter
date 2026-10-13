@@ -136,6 +136,26 @@ def test_explicit_client_name_returns_that_client_without_falling_back():
     manager.stop_monitoring()
 
 
+def test_avoid_client_names_prefers_an_alternative_without_hard_exclusion():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    preferred = SchedulingClient("preferred", 1)
+    alternative = SchedulingClient("alternative", 2)
+    manager.register_client(preferred)
+    manager.register_client(alternative)
+
+    selected = manager.get_available_client(
+        "retry", avoid_client_names={"preferred"},
+    )
+
+    assert selected is alternative
+    manager.release_client("retry")
+    manager.clients.remove(alternative)
+    assert manager.get_available_client(
+        "fallback", avoid_client_names={"preferred"},
+    ) is preferred
+    manager.stop_monitoring()
+
+
 def test_wait_for_available_client_is_woken_by_release():
     manager = AIClientManager(first_check_delay_sec=9999)
     client = SchedulingClient("shared", 1, group_id="agent_cli")

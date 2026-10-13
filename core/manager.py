@@ -593,6 +593,13 @@ class BaseAIClient(ABC):
                 usage = {}
         return self.budget_policy.evaluate(usage)
 
+    def can_accept_workload(
+            self, *, estimated_input_tokens: Optional[int] = None,
+            max_tokens: Optional[int] = None,
+    ) -> bool:
+        """请求级容量预检；无限额 Client 默认接受。"""
+        return True
+
     # ---------------------------------------- Not for user ----------------------------------------
 
     def set_event_sink(self, sink_callable):
@@ -1048,7 +1055,9 @@ class AIClientManager:
 
     def get_scheduling_capacity(self,
                                 target_group_id: str = None,
-                                allow_private: bool = False) -> int:
+                                allow_private: bool = False,
+                                estimated_input_tokens: Optional[int] = None,
+                                max_tokens: Optional[int] = None) -> int:
         """返回自动调度可使用的最大并发槽数（客户端数与分组上限的交集）。"""
         with self._lock:
             group_counts: Dict[Optional[str], int] = {}
@@ -1056,6 +1065,10 @@ class AIClientManager:
                 if not client._is_schedulable_for_demand():
                     continue
                 if not client.get_budget_decision().allowed:
+                    continue
+                if not client.can_accept_workload(
+                        estimated_input_tokens=estimated_input_tokens,
+                        max_tokens=max_tokens):
                     continue
                 visibility = getattr(client, "visibility", None)
                 if visibility == ClientVisibility.NAME_ONLY:
@@ -1078,7 +1091,11 @@ class AIClientManager:
                              request_change: bool = False,
                              target_group_id: str = None,
                              target_client_name: str = None,
-                             allow_private: bool = False) -> Optional[BaseAIClient]:
+                             allow_private: bool = False,
+                             estimated_input_tokens: Optional[int] = None,
+                             max_tokens: Optional[int] = None,
+                             avoid_client_names: Optional[set[str]] = None,
+                             ) -> Optional[BaseAIClient]:
         """
         Selects and acquires an *available* AI client for a given user, with optional
         constraints (by name / by group) and allocation policy support (PUBLIC/PRIVATE/NAME_ONLY).
@@ -1199,14 +1216,20 @@ class AIClientManager:
 
             if target_client_name:
                 return self._get_available_client_by_name(
-                    user_name, target_client_name, current_client, current_group_usage)
-            return self._get_available_client_by_conditions(user_name, request_change, target_group_id, allow_private, current_client, current_group_usage)
+                    user_name, target_client_name, current_client, current_group_usage,
+                    estimated_input_tokens, max_tokens)
+            return self._get_available_client_by_conditions(
+                user_name, request_change, target_group_id, allow_private,
+                current_client, current_group_usage, estimated_input_tokens,
+                max_tokens, avoid_client_names or set())
 
     def _get_available_client_by_name(self,
                                       user_name: str,
                                       target_client_name: str,
                                       current_client,
-                                      current_group_usage
+                                      current_group_usage,
+                                      estimated_input_tokens: Optional[int],
+                                      max_tokens: Optional[int],
                                       ) -> Optional[BaseAIClient]:
         client = self.get_client_by_name(target_client_name)
         if not client:
@@ -1222,6 +1245,10 @@ class AIClientManager:
         budget_decision = client.get_budget_decision()
         if not budget_decision.allowed:
             logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
+            return None
+        if not client.can_accept_workload(
+                estimated_input_tokens=estimated_input_tokens,
+                max_tokens=max_tokens):
             return None
 
         # If user already holds this client, keep it (even if request_change=True, we treat name as override)
@@ -1262,10 +1289,19 @@ class AIClientManager:
                                             target_group_id: str,
                                             allow_private: bool,
                                             current_client,
-                                            current_group_usage
+                                            current_group_usage,
+                                            estimated_input_tokens: Optional[int],
+                                            max_tokens: Optional[int],
+                                            avoid_client_names: set[str],
                                             ) -> Optional[BaseAIClient]:
         # Soft budget limits keep the client available but rank it behind normal candidates.
-        candidates = sorted(self.clients, key=self._client_scheduling_key)
+        candidates = sorted(
+            self.clients,
+            key=lambda candidate: (
+                getattr(candidate, "name", "") in avoid_client_names,
+                self._client_scheduling_key(candidate),
+            ),
+        )
         for client in candidates:
             client_name = getattr(client, 'name', '')
             client_status = client.get_status('status')
@@ -1297,6 +1333,10 @@ class AIClientManager:
             budget_decision = client.get_budget_decision()
             if not budget_decision.allowed:
                 logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
+                continue
+            if not client.can_accept_workload(
+                    estimated_input_tokens=estimated_input_tokens,
+                    max_tokens=max_tokens):
                 continue
 
             # --- FILTER: Group Concurrency Limits ---
