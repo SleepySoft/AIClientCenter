@@ -36,6 +36,14 @@ FRONTEND_HTML = r"""
             background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent);
             background-size: 1rem 1rem;
         }
+        .allocation-column { width: 13rem; max-width: 13rem; }
+        .allocation-owner {
+            display: block;
+            max-width: 11rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800 font-sans">
@@ -96,7 +104,7 @@ FRONTEND_HTML = r"""
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client Name / Model</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Health & Metrics</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocation</th>
+                        <th class="allocation-column px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocation</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Runtime Stats</th>
                         <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
@@ -192,7 +200,7 @@ FRONTEND_HTML = r"""
                             </div>
                         </td>
 
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <td class="allocation-column px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                              <div v-if="isSystemCheck(client.allocation.held_by)" class="bg-purple-50 border border-purple-100 rounded p-2">
                                 <div class="text-purple-700 font-bold flex items-center">
                                     <i class="fa-solid fa-stethoscope mr-2 animate-pulse"></i> 
@@ -203,9 +211,12 @@ FRONTEND_HTML = r"""
                                 </div>
                             </div>
                             <div v-else-if="client.allocation.held_by" class="bg-indigo-50 border border-indigo-100 rounded p-2">
-                                <div class="text-indigo-700 font-bold overflow-hidden text-ellipsis">
+                                <div class="text-indigo-700 font-bold flex items-center">
                                     <i class="fa-regular fa-user mr-1"></i> 
-                                    {{ client.allocation.held_by }}
+                                    <span class="allocation-owner"
+                                          :title="client.allocation.held_by">
+                                        {{ formatAllocationName(client.allocation.held_by) }}
+                                    </span>
                                 </div>
                                 <div class="text-xs mt-1">
                                     Duration: {{ formatDuration(client.allocation.duration_seconds) }}
@@ -340,6 +351,16 @@ FRONTEND_HTML = r"""
                 } catch (e) { alert("Action failed"); }
             },
             isSystemCheck(name) { return name && String(name).includes('[System Check]'); },
+            formatAllocationName(name) {
+                const value = String(name || '');
+                const hubPrefix = 'HubRuntime-v4-';
+                if (value.startsWith(hubPrefix)) {
+                    const id = value.slice(hubPrefix.length).replace(/-/g, '');
+                    return `Hub v4 · ${id.slice(-8)}`;
+                }
+                if (value.length <= 22) return value;
+                return `${value.slice(0, 10)}…${value.slice(-8)}`;
+            },
             getHeatClass(heat) {
                 if (!heat || heat === 0) return 'text-gray-400 font-normal'; 
                 if (heat < 3) return 'text-orange-500 font-bold';            
