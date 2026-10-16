@@ -4,6 +4,7 @@ aiohttp
 pytest
 backoff
 typing-extensions
+PyYAML>=6.0
 
 fastapi
 uvicorn

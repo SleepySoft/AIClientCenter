@@ -37,7 +37,7 @@ def resolve_api_keys(
         *,
         env_name: str,
 ) -> tuple[APIKeyCredential, ...]:
-    """解析 Python 配置中的多个 Key；未配置时回退到单个环境变量。
+    """解析配置中的多个 Key；未配置时回退到单个环境变量。
 
     Mapping 的键是只用于展示的稳定别名，值是 API Key。Sequence 会自动生成
     ``key_1``、``key_2`` 别名。额度身份由密钥指纹确定，明文不会进入日志或账本。

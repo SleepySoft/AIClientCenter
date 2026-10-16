@@ -9,8 +9,8 @@
 | 任务 | 文件或命令 | 说明 |
 | --- | --- | --- |
 | 校验并启动独立后台 | `python -m AIClientCenter`（`cli/launcher.py`） | 当前推荐入口。默认只监听本机，手动调用不会在启动阶段自动执行。 |
-| 在 IIS 中使用 | IntelligenceHubStartup.py（父项目） | IIS 仍读取父项目 `_config/ai_client_config.py`，并挂载受登录保护的后台。 |
-| 独立配置 client | config/config.py | 独立入口优先读取此本机文件；不存在时回退 config/example.py 并提示复制。 |
+| 在 IIS 中使用 | IntelligenceHubStartup.py（父项目） | IIS 仍读取父项目 `_config/ai_clients.yaml`，并挂载受登录保护的后台。 |
+| 独立配置 client | config/config.yaml | 独立入口优先读取此本机文件；不存在时回退 config/example.yaml 并提示复制。 |
 | 自动化回归 | tests/ | 离线 pytest 测试；不调用真实 API 或 Agent CLI。 |
 | 人工真实 Harness 冒烟 | tests/manual_agent_harness.py | 会消耗 Codex/Kimi 套餐，仅在需要验证本机 CLI 时运行。 |
 
@@ -45,7 +45,7 @@
 | --- | --- | --- |
 | web/dashboard.py | 保留 | Flask dashboard、timeline、手动 client 调用页。独立服务中手动调用默认关闭；IIS 在登录保护下开启。 |
 | cli/launcher.py | 保留，首选 | 加载、离线校验并启动独立 dashboard。 |
-| config/example.py | 保留 | 人工编辑的 Python 配置样例，不应放入真实 Token。 |
+| config/example.yaml | 保留 | 工厂式 YAML 配置样例，不应放入真实 Token。 |
 | tools/simplest_demo.py | 保留（最小示例） | 单 client 最小调用参考；不承担配置加载或后台职责。 |
 | tests/manual_agent_harness.py | 保留（付费手动测试） | 真实 CLI 冒烟、session/缓存验证；不纳入 pytest。 |
 

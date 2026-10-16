@@ -1,0 +1,12 @@
+# Copy to config.yaml. The loader consumes factory/name/group; all other keys
+# are passed directly to the selected factory.
+clients:
+  - factory: codex
+    name: Codex CLI Stateless
+    group: codex_cli
+    mode: stateless
+    sandbox: read-only
+
+# Group concurrency belongs to the manager, not to an individual client.
+group_limits:
+  codex_cli: 1

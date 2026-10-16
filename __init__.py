@@ -1,1 +1,17 @@
-"""AI 客户端管理、服务商适配与本机 Harness 集成。"""
+"""AI Client management, provider adapters, and local harness integration."""
+
+from AIClientCenter.configuration import (
+    ClientFactoryRegistry,
+    build_manager,
+    build_manager_from_config,
+    load_config,
+    validate_config,
+)
+
+__all__ = [
+    "ClientFactoryRegistry",
+    "build_manager",
+    "build_manager_from_config",
+    "load_config",
+    "validate_config",
+]

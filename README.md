@@ -32,17 +32,35 @@ An AI client center that supports token and model rotation
 
 ## 快速运行及预览
 
+标准配置只包含工厂调用和组并发：
+
+```yaml
+clients:
+  - factory: codex
+    name: Codex CLI Stateless
+    group: codex_cli
+    mode: stateless
+    sandbox: read-only
+
+group_limits:
+  codex_cli: 1
+```
+
+配置引擎只消费 `factory`、`name`、`group`，其余字段直接作为关键字参数传给
+`AIClientCenter.presets` 注册的工厂。复杂定制可改用 Python 配置并实现
+`build_ai_client_config()`，详见 `config/custom_example.py`。
+
 安装 [requirements.txt](requirements.txt) 后，推荐先运行独立 Launcher 校验配置，
 再访问本机管理页面。`recycled/` 中是已废弃文件，不是运行入口。
 
 ### 独立配置校验与手动对话页
 
 推荐使用 [cli/launcher.py](cli/launcher.py) 代替负载演示脚本。
-它默认加载本模块的 `config/config.py`，启动时只验证配置、预算策略和本机
+它默认加载本模块的 `config/config.yaml`，启动时只验证配置、预算策略和本机
 Harness CLI 路径，不会自动发送模型请求。首次找不到该文件时，会使用
-`config/example.py` 并显示复制命令：
+`config/example.yaml` 并显示复制命令：
 
-    Copy-Item AIClientCenter/config/example.py AIClientCenter/config/config.py
+    Copy-Item AIClientCenter/config/example.yaml AIClientCenter/config/config.yaml
 
     # 仅校验配置（不启动服务、不消耗模型额度）
     python -m AIClientCenter --validate-only
@@ -71,7 +89,7 @@ Harness CLI 路径，不会自动发送模型请求。首次找不到该文件�
 | `web/` | Flask dashboard 与受控手动调用页面。 |
 | `cli/` | 独立启动和配置校验入口。 |
 | `services/` | 余额查询与可轮换 Token 服务。 |
-| `config/` | 独立启动入口使用的配置：本机 `config.py`（已忽略）和可提交的 `example.py`。 |
+| `config/` | 独立启动入口使用的配置：本机 `config.yaml`（已忽略）、`example.yaml` 和高级定制 `custom_example.py`。 |
 | `tools/` | 最小调用示例和可选 PyQt5 余额查询 UI。 |
 | `tests/` | 离线 pytest；`manual_agent_harness.py` 是会消耗套餐的人工冒烟脚本。 |
 | `recycled/` | 已废弃历史文件，不维护、不参与当前导入图。 |
@@ -114,15 +132,15 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 
 [core/credentials.py](core/credentials.py)
 
-> 多 API Key 配置归一化。Python 配置文件可用 `{"account_a": "key..."}` 的形式
+> 多 API Key 配置归一化。工厂参数或自定义 Python 配置可用 `{"account_a": "key..."}` 的形式
 > 声明多个独立额度；客户端名只显示别名，SQLite 限额账本使用不可逆指纹隔离额度，
 > 不记录明文 Key。空映射会兼容回退到服务商原有的单 Key 环境变量。
 
 [presets.py](presets.py)
 
-> Python 配置文件的简化入口。`gemini_free()`、`groq_free()`、`nvidia_free()` 各自
-> 封装推荐模型、限额和并发策略，`compose_presets()` 负责无覆盖地组合结果。主配置只需
-> 传入 Key；普通付费 Client 仍可直接构造，不需要套用免费预置。
+> 内置 preset 与 YAML 工厂注册入口。`gemini_free()`、`groq_free()`、`nvidia_free()`
+> 封装推荐模型和限额策略，`FACTORIES` 将其与 Codex、Kimi、OpenClaw、智谱及通用
+> OpenAI-compatible 工厂暴露给配置引擎。组并发始终由 YAML 的 `group_limits` 提供。
 
 [services/token_rotator.py](services/token_rotator.py)
 
@@ -171,7 +189,7 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 当 API 服务不可用或余额查询失效时，可走已登录的 Agent CLI 进行分析：
 > `stateless` 模式每次全新调用（模拟 AI Client），`session` 模式沿会话续接以利用缓存省 Token。
 > 各 Agent CLI 的非交互调用方式调研见 [doc/AgentCLIResearch.md](doc/AgentCLIResearch.md)，
-> 配置示例见 [config/example.py](config/example.py) 末尾，冒烟测试见
+> 配置示例见 [config/example.yaml](config/example.yaml) 末尾，冒烟测试见
 > [tests/manual_agent_harness.py](tests/manual_agent_harness.py)。
 
 ## 文件状态与历史代码
