@@ -15,7 +15,7 @@ EXAMPLE_CONFIG = PACKAGE_ROOT / "config" / "example.yaml"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from AIClientCenter.configuration import (  # noqa: E402
+from AIClientCenter.factory_engine import (  # noqa: E402
     build_manager, load_config, validate_config,
 )
 from AIClientCenter.core.observation import CallObservationSQLiteLogger  # noqa: E402
@@ -49,7 +49,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="启动独立 AIClientCenter 管理页面。")
     parser.add_argument(
         "--config", type=Path,
-        help=f"AI Client YAML 或自定义 Python 配置（默认: {DEFAULT_CONFIG}）",
+        help=f"AI Client YAML 配置（默认: {DEFAULT_CONFIG}）",
     )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")

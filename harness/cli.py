@@ -645,3 +645,15 @@ def create_codex_client(name: str = 'Codex CLI', mode: str = MODE_STATELESS,
 def create_kimi_client(name: str = 'Kimi CLI', mode: str = MODE_STATELESS,
                        model: Optional[str] = None, **kwargs) -> KimiCLIClient:
     return KimiCLIClient(name=name, model=model, mode=mode, **kwargs)
+
+
+def create_codex_preset(*, name: str, group: str, **kwargs) -> CodexCLIClient:
+    """供配置工厂引擎调用的 Codex CLI 预置。"""
+
+    return create_codex_client(name=name, group_id=group, **kwargs)
+
+
+def create_kimi_preset(*, name: str, group: str, **kwargs) -> KimiCLIClient:
+    """供配置工厂引擎调用的 Kimi CLI 预置。"""
+
+    return create_kimi_client(name=name, group_id=group, **kwargs)

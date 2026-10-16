@@ -1,3 +1,4 @@
+import os
 import requests
 from typing_extensions import override
 from typing import Dict, List, Optional, Any, Union
@@ -286,3 +287,26 @@ class OuterTokenRotatingOpenAIClient(StandardOpenAIClient, RotatableClient):
         """
         if token == self.api_token:
             self.update_balance(balance)
+
+
+def create_openai_compatible_preset(
+        *, name: str, group: str, api_base_url: str, model: str,
+        api_key: Optional[str] = None, api_key_env: Optional[str] = None,
+        proxies: Optional[Dict[str, str]] = None, **kwargs,
+) -> StandardOpenAIClient:
+    """从配置构造一个通用 OpenAI-compatible Client。"""
+
+    if api_key is not None and api_key_env is not None:
+        raise ValueError("api_key 与 api_key_env 不能同时配置。")
+    token = api_key if api_key is not None else (
+        os.getenv(api_key_env) if api_key_env else None)
+    if not token:
+        raise ValueError("缺少 API Key；请配置 api_key 或 api_key_env。")
+    api = OpenAICompatibleAPI(
+        api_base_url=api_base_url,
+        token=token,
+        default_model=model,
+        proxies=dict(proxies or {}),
+    )
+    return StandardOpenAIClient(
+        name=name, group_id=group, openai_api=api, **kwargs)

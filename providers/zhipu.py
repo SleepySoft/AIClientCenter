@@ -293,3 +293,22 @@ class ZhipuSDKAdapter:
         except Exception as e:
             logger.critical(f"Unexpected Zhipu SDK System Error: {type(e).__name__}: {e}")
             return _make_error_result("PERMANENT", "UNEXPECTED_CLIENT_ERROR", f"System Failure: {str(e)}")
+
+
+def create_zhipu_preset(
+        *, name: str, group: str, api_key: Optional[str] = None,
+        api_key_env: str = "ZHIPU_API_KEY", model: str = "glm-4",
+        enable_thinking: bool = True, **kwargs,
+):
+    """从配置构造智谱 Client。"""
+
+    import os
+    from AIClientCenter.providers.openai_clients import StandardOpenAIClient
+
+    token = api_key or os.getenv(api_key_env)
+    if not token:
+        raise ValueError(f"环境变量 {api_key_env} 未设置。")
+    adapter = ZhipuSDKAdapter(
+        api_key=token, model=model, enable_thinking=enable_thinking)
+    return StandardOpenAIClient(
+        name=name, group_id=group, openai_api=adapter, **kwargs)

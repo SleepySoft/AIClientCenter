@@ -46,9 +46,29 @@ group_limits:
   codex_cli: 1
 ```
 
-配置引擎只消费 `factory`、`name`、`group`，其余字段直接作为关键字参数传给
-`AIClientCenter.presets` 注册的工厂。复杂定制可改用 Python 配置并实现
-`build_ai_client_config()`，详见 `config/custom_example.py`。
+配置工厂引擎只消费 `factory`、`name`、`group`，其余字段直接作为关键字参数传给
+`providers/` 中对应的预置构造函数。内置短名称包括 `codex`、`kimi`、
+`gemini_free`、`groq_free`、`nvidia_free`、`openai_compatible`、`openclaw`
+和 `zhipu`。
+
+自定义 Client 不需要修改工厂引擎。令自己的模块提供同一签名的工厂：
+
+```python
+def create_client(*, name, group, endpoint, **kwargs):
+    return MyClient(name=name, group_id=group, endpoint=endpoint, **kwargs)
+```
+
+然后直接在 YAML 引用可导入路径：
+
+```yaml
+- factory: my_package.clients:create_client
+  name: My Client
+  group: custom
+  endpoint: https://example.test
+```
+
+宿主程序也可以通过 `ClientFactoryEngine({"custom": create_client})` 注册短名称；
+两种扩展最终都走相同的配置读取、实例校验和 Client 列表拼装流程。
 
 安装 [requirements.txt](requirements.txt) 后，推荐先运行独立 Launcher 校验配置，
 再访问本机管理页面。`recycled/` 中是已废弃文件，不是运行入口。
@@ -89,7 +109,7 @@ Harness CLI 路径，不会自动发送模型请求。首次找不到该文件�
 | `web/` | Flask dashboard 与受控手动调用页面。 |
 | `cli/` | 独立启动和配置校验入口。 |
 | `services/` | 余额查询与可轮换 Token 服务。 |
-| `config/` | 独立启动入口使用的配置：本机 `config.yaml`（已忽略）、`example.yaml` 和高级定制 `custom_example.py`。 |
+| `config/` | 独立启动入口使用的 YAML 配置：本机 `config.yaml`（已忽略）和 `example.yaml`。 |
 | `tools/` | 最小调用示例和可选 PyQt5 余额查询 UI。 |
 | `tests/` | 离线 pytest；`manual_agent_harness.py` 是会消耗套餐的人工冒烟脚本。 |
 | `recycled/` | 已废弃历史文件，不维护、不参与当前导入图。 |
@@ -136,11 +156,11 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 声明多个独立额度；客户端名只显示别名，SQLite 限额账本使用不可逆指纹隔离额度，
 > 不记录明文 Key。空映射会兼容回退到服务商原有的单 Key 环境变量。
 
-[presets.py](presets.py)
+[factory_engine.py](factory_engine.py)
 
-> 内置 preset 与 YAML 工厂注册入口。`gemini_free()`、`groq_free()`、`nvidia_free()`
-> 封装推荐模型和限额策略，`FACTORIES` 将其与 Codex、Kimi、OpenClaw、智谱及通用
-> OpenAI-compatible 工厂暴露给配置引擎。组并发始终由 YAML 的 `group_limits` 提供。
+> 唯一配置装配入口：读取 YAML、解析内置短名称或 `module:callable` 外部工厂、调用
+> `providers/` 下的预置并拼装 Client 列表。扩展接口和工厂返回契约在文件顶部明确
+> 说明；组并发始终由 YAML 的 `group_limits` 提供。
 
 [services/token_rotator.py](services/token_rotator.py)
 

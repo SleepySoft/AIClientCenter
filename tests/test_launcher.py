@@ -5,8 +5,8 @@ from AIClientCenter.cli.launcher import (
     DEFAULT_CONFIG, EXAMPLE_CONFIG, PACKAGE_ROOT, PROJECT_ROOT, main,
     resolve_config_path,
 )
-from AIClientCenter.configuration import (
-    ClientFactoryRegistry, build_manager, load_config, validate_config,
+from AIClientCenter.factory_engine import (
+    ClientFactoryEngine, build_manager, load_config, validate_config,
 )
 from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 from AIClientCenter.core.manager import BaseAIClient, ClientStatus
@@ -57,26 +57,44 @@ def test_yaml_passes_non_reserved_fields_directly_to_factory(tmp_path):
         "  default: 1\n",
         encoding="utf-8",
     )
-    clients, limits = load_config(
-        path, registry=ClientFactoryRegistry({"launcher": _factory}))
+    clients, limits = load_config(path, factories={"launcher": _factory})
     assert list(clients) == ["one"]
     assert clients["one"].priority == 7
     assert clients["one"].group_id == "default"
     assert limits == {"default": 1}
 
 
-def test_custom_python_config_uses_explicit_builder(tmp_path):
-    path = tmp_path / "custom.py"
+def test_custom_factory_can_use_import_path(tmp_path):
+    path = tmp_path / "custom.yaml"
     path.write_text(
-        "from AIClientCenter.core.preset import ClientPreset\n"
-        "from AIClientCenter.tests.test_launcher import LauncherClient\n"
-        "def build_ai_client_config():\n"
-        "    client = LauncherClient(group_id='custom')\n"
-        "    return ClientPreset({'one': client}, {'custom': 1})\n",
+        "clients:\n"
+        "  - factory: AIClientCenter.tests.test_launcher:_factory\n"
+        "    name: imported\n"
+        "    group: custom\n"
+        "group_limits:\n"
+        "  custom: 1\n",
         encoding="utf-8",
     )
     clients, limits = load_config(path)
-    assert list(clients) == ["one"]
+    assert list(clients) == ["imported"]
+    assert limits == {"custom": 1}
+
+
+def test_host_can_register_factory_without_editing_engine(tmp_path):
+    path = tmp_path / "custom.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: local\n"
+        "    name: registered\n"
+        "    group: custom\n"
+        "group_limits:\n"
+        "  custom: 1\n",
+        encoding="utf-8",
+    )
+    engine = ClientFactoryEngine(include_builtins=False)
+    engine.register_factory("local", _factory)
+    clients, limits = engine.load(path)
+    assert list(clients) == ["registered"]
     assert limits == {"custom": 1}
 
 

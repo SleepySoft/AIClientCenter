@@ -887,3 +887,14 @@ def create_openclaw_client(
         timeout=timeout,
         **kwargs
     )
+
+
+def create_openclaw_preset(
+        *, name: str, group: str, gateway_token_env: Optional[str] = None,
+        **kwargs,
+) -> OpenClawClient:
+    """从配置构造 OpenClaw Client。"""
+
+    if gateway_token_env:
+        kwargs["gateway_token"] = os.getenv(gateway_token_env)
+    return create_openclaw_client(name=name, group_id=group, **kwargs)

@@ -13,7 +13,6 @@ from AIClientCenter.core.manager import (
     CLIENT_PRIORITY_CONSUMABLES,
     CLIENT_PRIORITY_FREEBIE,
 )
-from AIClientCenter.core.preset import ClientPreset
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
 from AIClientCenter.providers.openai_compatible import create_gemini_client
@@ -147,10 +146,13 @@ def build_gemini_free_clients(
                 )
     return clients
 
+def create_gemini_free_preset(
+        *, name: str, group: str, **kwargs,
+) -> dict[str, BaseAIClient]:
+    """供配置工厂引擎调用的 Gemini 免费层预置。"""
 
-def gemini_free(api_keys: APIKeyConfig = None, **kwargs) -> ClientPreset:
-    """返回可直接组合的 Gemini 免费层推荐预置。"""
-
-    clients = build_gemini_free_clients(api_keys, **kwargs)
-    limits = {GEMINI_FREE_GROUP_ID: len(clients)} if clients else {}
-    return ClientPreset(clients, limits)
+    clients = build_gemini_free_clients(**kwargs)
+    for client in clients.values():
+        client.group_id = group
+        client.name = name if len(clients) == 1 else f"{name} / {client.name}"
+    return clients

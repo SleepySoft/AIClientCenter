@@ -13,7 +13,6 @@ from AIClientCenter.core.manager import (
     CLIENT_PRIORITY_CONSUMABLES,
     CLIENT_PRIORITY_FREEBIE,
 )
-from AIClientCenter.core.preset import ClientPreset
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
 from AIClientCenter.providers.openai_compatible import create_nvidia_client
@@ -142,19 +141,23 @@ def build_nvidia_clients(
             )
     return clients
 
+def create_nvidia_free_preset(
+        *, name: str, group: str, **kwargs,
+) -> dict[str, BaseAIClient]:
+    """供配置工厂引擎调用的 NVIDIA 免费端点预置。"""
+
+    clients = build_nvidia_clients(**kwargs)
+    for client in clients.values():
+        client.group_id = group
+        client.name = name if len(clients) == 1 else f"{name} / {client.name}"
+    return clients
+
 
 def nvidia_group_limits(clients: dict[str, BaseAIClient]) -> dict[str, int]:
-    """每个账号只允许一个在途请求，不同账号可以并行。"""
+    """为直接使用 provider builder 的调用方生成按账号分组限制。"""
 
     return {
         client.group_id: 1
         for client in clients.values()
         if client.group_id.startswith(NVIDIA_GROUP_PREFIX)
     }
-
-
-def nvidia_free(api_keys: APIKeyConfig = None, **kwargs) -> ClientPreset:
-    """返回可直接组合的 NVIDIA 免费原型端点推荐预置。"""
-
-    clients = build_nvidia_clients(api_keys, **kwargs)
-    return ClientPreset(clients, nvidia_group_limits(clients))
