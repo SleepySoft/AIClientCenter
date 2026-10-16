@@ -98,6 +98,76 @@ def test_host_can_register_factory_without_editing_engine(tmp_path):
     assert limits == {"custom": 1}
 
 
+def test_python_file_factory_is_relative_to_yaml_not_working_directory(
+        tmp_path, monkeypatch):
+    config_dir = tmp_path / "deployment"
+    config_dir.mkdir()
+    (config_dir / "local_settings.py").write_text(
+        "PRIORITY = 7\n", encoding="utf-8")
+    factory_file = config_dir / "custom_clients.py"
+    factory_file.write_text(
+        "from AIClientCenter.tests.test_launcher import LauncherClient\n"
+        "from .local_settings import PRIORITY\n"
+        "def create_client(*, name, group, **kwargs):\n"
+        "    return LauncherClient(name=name, group_id=group, "
+        "priority=PRIORITY, **kwargs)\n",
+        encoding="utf-8",
+    )
+    config_file = config_dir / "clients.yaml"
+    config_file.write_text(
+        "clients:\n"
+        "  - factory: ./custom_clients.py:create_client\n"
+        "    name: relative\n"
+        "    group: custom\n"
+        "group_limits:\n"
+        "  custom: 1\n",
+        encoding="utf-8",
+    )
+    unrelated_dir = tmp_path / "elsewhere"
+    unrelated_dir.mkdir()
+    monkeypatch.chdir(unrelated_dir)
+
+    clients, limits = load_config(config_file)
+
+    assert list(clients) == ["relative"]
+    assert clients["relative"].priority == 7
+    assert limits == {"custom": 1}
+
+
+def test_self_rotating_openai_preset_keeps_model_and_token_rotation(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("ROTATION_TOKEN_A", "token-a")
+    monkeypatch.setenv("ROTATION_TOKEN_B", "token-b")
+    path = tmp_path / "rotating.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: self_rotating_openai\n"
+        "    name: rotating\n"
+        "    group: rotating\n"
+        "    api_base_url: https://example.invalid/v1\n"
+        "    models: [model-a, model-b]\n"
+        "    token_envs: [ROTATION_TOKEN_A, ROTATION_TOKEN_B]\n"
+        "    model_rotate_per_times: 2\n"
+        "    token_rotate_per_times: 3\n"
+        "group_limits:\n"
+        "  rotating: 1\n",
+        encoding="utf-8",
+    )
+
+    clients, limits = load_config(path)
+    client = clients["rotating"]
+
+    assert client.model_rotator.get_stats() == {
+        "total_items": 2, "current_index": 0, "current_uses": 0,
+        "rotate_threshold": 2,
+    }
+    assert client.token_rotator.get_stats() == {
+        "total_items": 2, "current_index": 0, "current_uses": 0,
+        "rotate_threshold": 3,
+    }
+    assert limits == {"rotating": 1}
+
+
 def test_validate_requires_group_limit_and_reports_hard_budget():
     client = LauncherClient(
         group_id="missing",

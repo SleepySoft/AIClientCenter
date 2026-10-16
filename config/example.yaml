@@ -8,6 +8,29 @@ clients:
     mode: stateless
     sandbox: read-only
 
+  # 一个 Client 同时轮转多个模型和多个 Token。取消注释前先设置列出的环境变量。
+  # - factory: self_rotating_openai
+  #   name: ModelScope Rotating Client
+  #   group: modelscope
+  #   api_base_url: https://api-inference.modelscope.cn/v1
+  #   models:
+  #     - deepseek-ai/DeepSeek-R1-0528
+  #     - deepseek-ai/DeepSeek-V3.2-Exp
+  #     - Qwen/Qwen3-Coder-480B-A35B-Instruct
+  #   token_envs:
+  #     - MODELSCOPE_API_KEY_1
+  #     - MODELSCOPE_API_KEY_2
+  #     - MODELSCOPE_API_KEY_3
+  #   model_rotate_per_times: 5
+  #   token_rotate_per_times: 15
+
+  # 自定义单文件工厂：路径相对于本 YAML，而不是启动命令的工作目录。
+  # - factory: ./custom_clients.py:create_client
+  #   name: Custom Client
+  #   group: custom
+
 # Group concurrency belongs to the manager, not to an individual client.
 group_limits:
   codex_cli: 1
+  # modelscope: 1
+  # custom: 1

@@ -47,9 +47,11 @@ group_limits:
 ```
 
 配置工厂引擎只消费 `factory`、`name`、`group`，其余字段直接作为关键字参数传给
-`providers/` 中对应的预置构造函数。内置短名称包括 `codex`、`kimi`、
-`gemini_free`、`groq_free`、`nvidia_free`、`openai_compatible`、`openclaw`
-和 `zhipu`。
+`providers/` 中对应的预置构造函数。这里的 `providers/` 同时包含两部分：底层协议/
+厂商适配器，以及供配置引擎调用、名称以 `_preset` 结尾的组装函数。用户实现自定义
+工厂时，可直接参考这些 `create_*_preset()` 的参数和返回方式。内置短名称包括 `codex`、`kimi`、
+`gemini_free`、`groq_free`、`nvidia_free`、`openai_compatible`、`openclaw`、
+`zhipu` 和 `self_rotating_openai`。
 
 自定义 Client 不需要修改工厂引擎。令自己的模块提供同一签名的工厂：
 
@@ -67,8 +69,40 @@ def create_client(*, name, group, endpoint, **kwargs):
   endpoint: https://example.test
 ```
 
+`my_package.clients:create_client` 按 Python 的正常模块规则导入，适合已经安装或位于
+应用导入路径中的包。部署目录中的单文件工厂可写成
+`./custom_clients.py:create_client`；该路径固定相对于 YAML 所在目录解析，与从哪个
+工作目录启动 IIS 无关。工厂需要引用同目录辅助模块时可使用
+`from .local_settings import ...`。不要使用含义不明确的“相对于当前工作目录”路径。
+
 宿主程序也可以通过 `ClientFactoryEngine({"custom": create_client})` 注册短名称；
 两种扩展最终都走相同的配置读取、实例校验和 Client 列表拼装流程。
+
+一个 Client 同时轮转多个模型和多个 Token 的内置预置示例：
+
+```yaml
+clients:
+  - factory: self_rotating_openai
+    name: ModelScope Rotating Client
+    group: modelscope
+    api_base_url: https://api-inference.modelscope.cn/v1
+    models:
+      - deepseek-ai/DeepSeek-R1-0528
+      - deepseek-ai/DeepSeek-V3.2-Exp
+      - Qwen/Qwen3-Coder-480B-A35B-Instruct
+    token_envs:
+      - MODELSCOPE_API_KEY_1
+      - MODELSCOPE_API_KEY_2
+      - MODELSCOPE_API_KEY_3
+    model_rotate_per_times: 5
+    token_rotate_per_times: 15
+
+group_limits:
+  modelscope: 1
+```
+
+这里保留了旧示例的行为：每个模型连续使用 5 次，三个模型合计 15 次后切换
+Token。密钥通过环境变量加载，不需要写入 YAML。
 
 安装 [requirements.txt](requirements.txt) 后，推荐先运行独立 Launcher 校验配置，
 再访问本机管理页面。`recycled/` 中是已废弃文件，不是运行入口。
@@ -104,7 +138,7 @@ Harness CLI 路径，不会自动发送模型请求。首次找不到该文件�
 | 路径 | 用途 |
 | --- | --- |
 | `core/` | 调度器、Client 基类、预算策略、用量统计、SQLite 状态日志和通用轮换器。 |
-| `providers/` | OpenAI 兼容协议、OpenAI Client、智谱、Gemini、OpenClaw 等服务商适配。 |
+| `providers/` | 底层服务商适配，以及配置引擎可直接调用的 `create_*_preset()` 组装函数。 |
 | `harness/` | 已登录的本机 Agent CLI 适配器（Codex、Kimi）。 |
 | `web/` | Flask dashboard 与受控手动调用页面。 |
 | `cli/` | 独立启动和配置校验入口。 |

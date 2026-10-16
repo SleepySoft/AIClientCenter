@@ -310,3 +310,46 @@ def create_openai_compatible_preset(
     )
     return StandardOpenAIClient(
         name=name, group_id=group, openai_api=api, **kwargs)
+
+
+def create_self_rotating_openai_preset(
+        *, name: str, group: str, api_base_url: str, models: List[str],
+        tokens: Optional[List[str]] = None,
+        token_envs: Optional[List[str]] = None,
+        model_rotate_per_times: int = 1,
+        token_rotate_per_times: int = 1,
+        proxies: Optional[Dict[str, str]] = None,
+        **kwargs,
+) -> SelfRotatingOpenAIClient:
+    """创建一个在多个模型和多个 Token 间轮转的 Client preset。
+
+    ``tokens`` 适合由部署系统直接注入；通常更推荐在 YAML 中填写
+    ``token_envs``，避免把密钥写入配置文件。模型与 Token 的切换频率分别由
+    ``model_rotate_per_times`` 和 ``token_rotate_per_times`` 控制。
+    """
+
+    selected_models = [str(model).strip() for model in models if str(model).strip()]
+    selected_tokens = [str(token).strip() for token in (tokens or []) if str(token).strip()]
+    for env_name in token_envs or []:
+        token = os.getenv(str(env_name))
+        if not token:
+            raise ValueError(f"环境变量 {env_name} 未设置。")
+        selected_tokens.append(token)
+    if not selected_models:
+        raise ValueError("models 至少需要一个模型。")
+    if not selected_tokens:
+        raise ValueError("tokens 或 token_envs 至少需要提供一个 Token。")
+    if model_rotate_per_times < 1 or token_rotate_per_times < 1:
+        raise ValueError("模型和 Token 的 rotate_per_times 必须是正整数。")
+
+    api = OpenAICompatibleAPI(
+        api_base_url=api_base_url,
+        token=selected_tokens[0],
+        default_model=selected_models[0],
+        proxies=dict(proxies or {}),
+    )
+    client = SelfRotatingOpenAIClient(
+        name=name, group_id=group, openai_api=api, **kwargs)
+    client.set_rotation_models(selected_models, model_rotate_per_times)
+    client.set_rotation_tokens(selected_tokens, token_rotate_per_times)
+    return client
