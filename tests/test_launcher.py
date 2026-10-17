@@ -64,6 +64,49 @@ def test_yaml_passes_non_reserved_fields_directly_to_factory(tmp_path):
     assert limits == {"default": 1}
 
 
+def test_disabled_yaml_entry_is_kept_but_not_built(tmp_path):
+    path = tmp_path / "clients.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: unavailable_factory\n"
+        "    name: disabled\n"
+        "    group: disabled_group\n"
+        "    enable: false\n"
+        "  - factory: launcher\n"
+        "    name: enabled\n"
+        "    group: default\n"
+        "group_limits:\n"
+        "  default: 1\n",
+        encoding="utf-8",
+    )
+
+    clients, limits = load_config(path, factories={"launcher": _factory})
+
+    assert list(clients) == ["enabled"]
+    assert limits == {"default": 1}
+
+
+def test_enable_must_be_boolean(tmp_path):
+    path = tmp_path / "clients.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: launcher\n"
+        "    name: invalid\n"
+        "    group: default\n"
+        "    enable: 'false'\n"
+        "group_limits:\n"
+        "  default: 1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        load_config(path, factories={"launcher": _factory})
+    except ValueError as exc:
+        assert "clients[0].enable 必须是布尔值" in str(exc)
+    else:
+        raise AssertionError("string enable value must be rejected")
+
+
 def test_custom_factory_can_use_import_path(tmp_path):
     path = tmp_path / "custom.yaml"
     path.write_text(

@@ -1,10 +1,11 @@
-# Copy to config.yaml. The loader consumes factory/name/group; all other keys
+# Copy to config.yaml. The loader consumes factory/name/group/enable; all other keys
 # are passed directly to the selected provider preset. A custom factory may be
 # referenced as "my_package.clients:create_client" without editing the engine.
 clients:
   - factory: codex
     name: Codex CLI Stateless
     group: codex_cli
+    enable: true
     mode: stateless
     sandbox: read-only
 

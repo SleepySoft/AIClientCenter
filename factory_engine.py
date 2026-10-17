@@ -13,8 +13,9 @@
    ``ClientFactoryEngine({"custom": create_client}).load(config_path)``。
 
 自定义工厂必须接受关键字参数 ``name``、``group`` 以及自己的配置参数，并返回一个
-``BaseAIClient`` 或 ``Mapping[str, BaseAIClient]``。YAML 中除 factory/name/group 外的
-字段会原样作为关键字参数传入工厂。
+``BaseAIClient`` 或 ``Mapping[str, BaseAIClient]``。YAML 中除
+factory/name/group/enable 外的字段会原样作为关键字参数传入工厂；``enable`` 默认为
+``true``，设为 ``false`` 时保留配置但不创建 Client。
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from AIClientCenter.core.manager import AIClientManager, BaseAIClient
 
 
 ClientFactory = Callable[..., BaseAIClient | Mapping[str, BaseAIClient]]
-RESERVED_FIELDS = frozenset({"factory", "name", "group"})
+RESERVED_FIELDS = frozenset({"factory", "name", "group", "enable"})
 
 
 def builtin_factories() -> dict[str, ClientFactory]:
@@ -160,6 +161,11 @@ class ClientFactoryEngine:
         location = f"clients[{index}]"
         if not isinstance(entry, dict):
             raise ValueError(f"{location} 必须是对象。")
+        enabled = entry.get("enable", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{location}.enable 必须是布尔值。")
+        if not enabled:
+            return {}
         factory_name = _required(entry, "factory", location)
         name = _required(entry, "name", location)
         group = _required(entry, "group", location)

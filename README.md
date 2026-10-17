@@ -39,6 +39,7 @@ clients:
   - factory: codex
     name: Codex CLI Stateless
     group: codex_cli
+    enable: true
     mode: stateless
     sandbox: read-only
 
@@ -46,7 +47,7 @@ group_limits:
   codex_cli: 1
 ```
 
-配置工厂引擎只消费 `factory`、`name`、`group`，其余字段直接作为关键字参数传给
+配置工厂引擎只消费 `factory`、`name`、`group`、`enable`，其余字段直接作为关键字参数传给
 `providers/` 中对应的预置构造函数。这里的 `providers/` 同时包含两部分：底层协议/
 厂商适配器，以及供配置引擎调用、名称以 `_preset` 结尾的组装函数。用户实现自定义
 工厂时，可直接参考这些 `create_*_preset()` 的参数和返回方式。内置短名称包括 `codex`、`kimi`、
