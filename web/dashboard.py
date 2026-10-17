@@ -103,9 +103,10 @@ FRONTEND_HTML = r"""
                     <tr>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client Name / Model</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Health & Metrics</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Runtime Health & Metrics</th>
                         <th class="allocation-column px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocation</th>
                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Runtime Stats</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Validation Feedback</th>
                         <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
@@ -113,7 +114,7 @@ FRONTEND_HTML = r"""
                 <tbody class="bg-white" v-for="(group, groupName) in groupedClients" :key="groupName">
 
                     <tr class="bg-gray-100 border-t border-b border-gray-200">
-                        <td colspan="6" class="px-6 py-2">
+                        <td colspan="7" class="px-6 py-2">
                             <div class="flex items-center justify-between">
                                 <div class="flex items-center space-x-4">
                                     <span class="font-bold text-gray-700 text-sm">
@@ -191,10 +192,7 @@ FRONTEND_HTML = r"""
                                          :class="getHealthColor(client.state.health_score)"
                                          :style="{ width: client.state.health_score + '%' }"></div>
                                 </div>
-                                <div class="text-[10px] text-gray-500 flex justify-between">
-                                    <span>Runtime {{ client.state.runtime_health_score }}%</span>
-                                    <span>Quality {{ client.state.quality_score }}%</span>
-                                </div>
+                                <div class="text-[10px] text-gray-500">Client/API failures only</div>
                                 <div v-if="!client.budget.admitted" class="text-[10px] text-red-600 mt-1 font-semibold">
                                     QUOTA BLOCKED · {{ client.budget.reason }}
                                 </div>
@@ -247,6 +245,20 @@ FRONTEND_HTML = r"""
                                 </span>
                                 <span class="text-gray-600">Errors: <b :class="{'text-red-600': client.runtime_stats.error_sum > 0}">{{ client.runtime_stats.error_sum }}</b></span>
                                 <span class="text-gray-400">Rate: {{ client.runtime_stats.error_rate_percent }}%</span>
+                            </div>
+                        </td>
+
+                        <td class="px-6 py-4 whitespace-nowrap text-xs">
+                            <div class="flex flex-col space-y-1">
+                                <span class="text-gray-600">Quality: <b>{{ client.feedback_stats.quality_score }}%</b></span>
+                                <span class="text-gray-600">
+                                    Valid: <b class="text-green-600">{{ client.feedback_stats.success_count }}</b>
+                                    / Invalid: <b :class="{'text-red-600': client.feedback_stats.failure_count > 0}">{{ client.feedback_stats.failure_count }}</b>
+                                </span>
+                                <span class="text-gray-400">Feedbacks: {{ client.feedback_stats.count }} · Invalid {{ client.feedback_stats.failure_rate_percent }}%</span>
+                                <span v-if="client.feedback_stats.consecutive_quality_failures > 0" class="text-orange-600">
+                                    Invalid streak: {{ client.feedback_stats.consecutive_quality_failures }}
+                                </span>
                             </div>
                         </td>
 

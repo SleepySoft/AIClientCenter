@@ -1492,8 +1492,10 @@ class AIClientManager:
                 raw_status = client._status
                 quality_score = float(raw_status.get('quality_score', 100.0))
                 schedulable = client._is_schedulable_for_demand(now)
+                # 客户端自身健康与下游业务校验反馈是两种不同信号：
+                # Availability 只描述调用链是否可用；Quality 单独统计并用于调度避让。
                 health_score = round(
-                    min(float(runtime_health_score), quality_score)
+                    float(runtime_health_score)
                     if schedulable and budget_decision.allowed else 0.0,
                     1,
                 )
@@ -1515,6 +1517,13 @@ class AIClientManager:
                 err_count = raw_status.get('error_count', 0)
                 err_sum = raw_status.get('error_sum', 0)
                 err_rate = (err_sum / chat_count * 100) if chat_count > 0 else 0.0
+                feedback_count = raw_status.get('quality_feedback_count', 0)
+                feedback_failure_count = raw_status.get('quality_failure_count', 0)
+                feedback_success_count = max(0, feedback_count - feedback_failure_count)
+                feedback_failure_rate = (
+                    feedback_failure_count / feedback_count * 100
+                    if feedback_count > 0 else 0.0
+                )
 
                 client_details.append({
                     "meta": {
@@ -1556,19 +1565,24 @@ class AIClientManager:
                         "error_count": err_count,
                         "error_sum": err_sum,
                         "circuit_open_count": raw_status.get('circuit_open_count', 0),
-                        "quality_feedback_count": raw_status.get('quality_feedback_count', 0),
-                        "quality_failure_count": raw_status.get('quality_failure_count', 0),
-                        "consecutive_quality_failures": raw_status.get(
-                            'consecutive_quality_failures', 0),
                         "error_rate_percent": round(err_rate, 1),
                         "last_chat_ts": raw_status.get('last_chat', 0),
+                    },
+                    "feedback_stats": {
+                        "count": feedback_count,
+                        "success_count": feedback_success_count,
+                        "failure_count": feedback_failure_count,
+                        "consecutive_quality_failures": raw_status.get(
+                            'consecutive_quality_failures', 0),
+                        "failure_rate_percent": round(feedback_failure_rate, 1),
+                        "quality_score": quality_score,
                     },
                     "metrics": metrics_detail,
                     "rate_limit": rate_limit_detail,
                 })
 
             # Sort: 1. By Priority (asc), 2. By Busy Status (busy first).
-            # health_score 是面向运维界面的当前可用度；runtime_health_score 保留纯运行态口径。
+            # health_score 是面向运维界面的调用可用度；业务反馈质量由 feedback_stats 单列。
             client_details.sort(key=lambda x: (
                 x['meta']['priority'],
                 not x['state']['is_busy'],

@@ -122,6 +122,28 @@ def test_quality_feedback_reorders_clients_without_marking_transport_error():
     manager.release_client("next-task")
 
 
+def test_client_stats_separate_runtime_failures_from_validation_feedback():
+    manager = AIClientManager()
+    client = FakeClient()
+    manager.register_client(client)
+
+    manager.report_client_feedback(client, None, valid=False)
+    details = manager.get_client_stats()["clients"][0]
+
+    assert details["state"]["health_score"] == 100.0
+    assert details["state"]["runtime_health_score"] == 100.0
+    assert details["runtime_stats"]["error_sum"] == 0
+    assert "quality_failure_count" not in details["runtime_stats"]
+    assert details["feedback_stats"] == {
+        "count": 1,
+        "success_count": 0,
+        "failure_count": 1,
+        "consecutive_quality_failures": 1,
+        "failure_rate_percent": 100.0,
+        "quality_score": 80.0,
+    }
+
+
 def test_force_acquire_allows_a_health_check_to_probe_an_unavailable_client():
     client = FakeClient()
     client._update_client_status(ClientStatus.UNAVAILABLE)
