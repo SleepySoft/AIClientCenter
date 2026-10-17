@@ -43,6 +43,9 @@ def test_nvidia_builder_isolates_accounts_and_shares_each_account_limiter(tmp_pa
     snapshot = account_a[0].get_rate_limit_snapshot()
     assert snapshot["effective_limits"]["rpm"] == 24
     assert "nvapi-test" not in snapshot["storage_namespace"]
+    assert "moonshotai/kimi-k3" not in DEFAULT_MODELS
+    assert all(client.health_policy.failure_threshold == 1 for client in clients.values())
+    assert all(client.health_policy.initial_backoff_sec == 300 for client in clients.values())
 
 
 def test_nvidia_builder_assigns_primary_and_reserve_priorities(monkeypatch, tmp_path):

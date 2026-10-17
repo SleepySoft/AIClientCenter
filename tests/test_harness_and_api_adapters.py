@@ -40,9 +40,9 @@ def test_codex_jsonl_bad_request_is_not_misclassified_by_request_id_text():
 
 
 class _Response:
-    def __init__(self, status_code):
+    def __init__(self, status_code, text="error body"):
         self.status_code = status_code
-        self.text = "error body"
+        self.text = text
 
     def json(self):
         return {}
@@ -55,3 +55,23 @@ def test_sync_http_error_classification_separates_auth_from_bad_request():
 
     api._attempt_sync_post = lambda *args, **kwargs: _Response(400)
     assert api._post_sync_unified("chat/completions", {}, False)["error"]["type"] == "BAD_REQUEST"
+
+    api._attempt_sync_post = lambda *args, **kwargs: _Response(410)
+    assert api._post_sync_unified("chat/completions", {}, False)["error"]["type"] == "PERMANENT"
+
+
+def test_sync_http_400_distinguishes_upstream_and_content_safety():
+    api = OpenAICompatibleAPI("https://example.invalid/v1", token="test")
+    api._attempt_sync_post = lambda *args, **kwargs: _Response(
+        400, "Function id 'missing-function' was not found",
+    )
+    upstream = api._post_sync_unified("chat/completions", {}, False)["error"]
+    assert upstream["type"] == "TRANSIENT_SERVER"
+    assert upstream["code"] == "HTTP_400_UPSTREAM"
+
+    api._attempt_sync_post = lambda *args, **kwargs: _Response(
+        400, "Request rejected by content policy",
+    )
+    safety = api._post_sync_unified("chat/completions", {}, False)["error"]
+    assert safety["type"] == "BAD_REQUEST"
+    assert safety["code"] == "CONTENT_SAFETY"

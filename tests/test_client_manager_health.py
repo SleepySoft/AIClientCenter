@@ -104,6 +104,24 @@ def test_bad_request_is_fatal_for_the_task_but_does_not_disable_the_client():
     assert client.get_status("error_count") == 0
 
 
+def test_quality_feedback_reorders_clients_without_marking_transport_error():
+    manager = AIClientManager()
+    first = FakeClient()
+    first.name = "first"
+    second = FakeClient()
+    second.name = "second"
+    manager.register_client(first)
+    manager.register_client(second)
+
+    manager.report_client_feedback(first, None, valid=False)
+
+    selected = manager.get_available_client("next-task")
+    assert selected is second
+    assert first.get_status("quality_score") == 80.0
+    assert first.get_status("error_count") == 0
+    manager.release_client("next-task")
+
+
 def test_force_acquire_allows_a_health_check_to_probe_an_unavailable_client():
     client = FakeClient()
     client._update_client_status(ClientStatus.UNAVAILABLE)

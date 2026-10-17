@@ -112,16 +112,19 @@ def test_passive_harness_style_client_is_not_periodically_probed():
     manager.stop_monitoring()
 
 
-def test_client_stats_expose_budget_separately_from_runtime_health():
+def test_client_stats_expose_runtime_health_but_show_budget_blocked_availability():
     manager = AIClientManager(first_check_delay_sec=9999)
     client = MetricsClient(quota_config={"limits": {"request_count": 0}})
     manager.register_client(client)
 
     details = manager.get_client_stats()["clients"][0]
 
-    assert details["state"]["health_score"] == 100.0
+    assert details["state"]["health_score"] == 0.0
+    assert details["state"]["runtime_health_score"] == 100.0
+    assert details["state"]["schedulable"] is False
     assert details["budget"]["mode"] == "hard_limit"
     assert details["budget"]["admitted"] is False
+    assert manager.get_client_stats()["summary"]["available"] == 0
     manager.stop_monitoring()
 
 

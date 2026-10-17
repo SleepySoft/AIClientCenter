@@ -12,6 +12,7 @@ from AIClientCenter.core.manager import (
     BaseAIClient,
     CLIENT_PRIORITY_CONSUMABLES,
     CLIENT_PRIORITY_FREEBIE,
+    HealthPolicy,
 )
 from AIClientCenter.core.rate_limit import EstimatedRateLimiter
 from AIClientCenter.providers.openai_clients import RateLimitedOpenAIClient
@@ -40,10 +41,6 @@ NVIDIA_FREE_MODEL_SPECS: dict[str, NvidiaModelSpec] = {
         CLIENT_PRIORITY_FREEBIE,
         "753B MoE / 1M context; primary multilingual model",
     ),
-    "moonshotai/kimi-k3": NvidiaModelSpec(
-        CLIENT_PRIORITY_CONSUMABLES,
-        "2.8T MoE / 1M context; experimental multilingual reserve",
-    ),
     "z-ai/glm-5.3-flash": NvidiaModelSpec(
         CLIENT_PRIORITY_CONSUMABLES,
         "320B MoE; throughput-oriented reserve",
@@ -57,7 +54,6 @@ NVIDIA_FREE_MODEL_SPECS: dict[str, NvidiaModelSpec] = {
 DEFAULT_MODELS = (
     "nvidia/nemotron-3-ultra-550b-a55b",
     "z-ai/glm-5.3",
-    "moonshotai/kimi-k3",
 )
 
 
@@ -132,6 +128,12 @@ def build_nvidia_clients(
                 rate_limiter=limiter,
                 priority=spec.priority,
                 group_id=group_id,
+                health_policy=HealthPolicy(
+                    failure_threshold=1,
+                    initial_backoff_sec=300.0,
+                    max_backoff_sec=7200.0,
+                    jitter_ratio=0.2,
+                ),
                 default_available=True,
                 observation_context={
                     "provider": "nvidia",

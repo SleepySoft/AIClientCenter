@@ -216,6 +216,10 @@ class BaseAIClient(ABC):
             'circuit_open_count': 0,
             'last_failure_reason': None,
             'recovery_trial_started': False,
+            'quality_feedback_count': 0,
+            'quality_failure_count': 0,
+            'consecutive_quality_failures': 0,
+            'quality_score': 100.0,
         }
 
         self.test_prompt = "If you are working, please respond with 'OK'."
@@ -373,6 +377,19 @@ class BaseAIClient(ABC):
     def get_status(self, key: Optional[str] = None) -> Any:
         with self._lock:
             return self._status.get(key, None) if key else self._status.copy()
+
+    def record_quality_feedback(self, valid: bool) -> None:
+        """记录业务结果质量，不把 schema 不合格误报成网络故障。"""
+        with self._lock:
+            self._status['quality_feedback_count'] += 1
+            if valid:
+                self._status['consecutive_quality_failures'] = 0
+            else:
+                self._status['quality_failure_count'] += 1
+                self._status['consecutive_quality_failures'] += 1
+            previous = float(self._status.get('quality_score', 100.0))
+            target = 100.0 if valid else 0.0
+            self._status['quality_score'] = round(previous * 0.8 + target * 0.2, 2)
 
     def _set_circuit_state_locked(self, state: CircuitState) -> None:
         old_state = self._status['circuit_state']
@@ -1398,10 +1415,13 @@ class AIClientManager:
                 if callable(pressure_getter) else 0.0
         except Exception:
             pressure = 0.0
-        # 只在同优先级 Client 之间按配额压力分流，不跨越整数优先级。
+        # 配额压力只作同优先级微调；连续业务校验失败则允许跨优先级避让。
         runtime_penalty = 10000.0 if client.get_status('status') == ClientStatus.ERROR else 0.0
+        quality_score = float(client.get_status('quality_score') or 0.0)
+        quality_streak = int(client.get_status('consecutive_quality_failures') or 0)
+        quality_penalty = (100.0 - quality_score) + quality_streak * 10.0
         return (getattr(client, 'priority', CLIENT_PRIORITY_NORMAL)
-                + penalty + runtime_penalty + pressure * 0.01)
+                + penalty + runtime_penalty + quality_penalty + pressure * 0.01)
 
     def release_client(self, client: BaseAIClient | str):
         """
@@ -1448,7 +1468,9 @@ class AIClientManager:
             # 2. Categorize Clients
             # 使用 getattr 避免 AttributeError，如果没有 status 属性则默认 UNKNOWN
             available_cnt = sum(
-                1 for c in self.clients if c._is_schedulable_for_demand(now)
+                1 for c in self.clients
+                if c._is_schedulable_for_demand(now)
+                and c.get_budget_decision().allowed
             )
             busy_cnt = sum(1 for c in self.clients if c._is_busy())
             error_cnt_clients = sum(1 for c in self.clients if c.get_status('error_count') > 0)
@@ -1456,7 +1478,9 @@ class AIClientManager:
             client_details = []
             for client in self.clients:
                 # --- Extract Data ---
-                health_score = client.calculate_health() if hasattr(client, 'calculate_health') else 100
+                runtime_health_score = (
+                    client.calculate_health() if hasattr(client, 'calculate_health') else 100
+                )
                 budget_decision = client.get_budget_decision()
                 budget_policy = getattr(client, 'budget_policy', None)
                 metrics_detail = client.get_standardized_metrics() if hasattr(client,
@@ -1466,6 +1490,13 @@ class AIClientManager:
 
                 # Access internal status directly for raw counters
                 raw_status = client._status
+                quality_score = float(raw_status.get('quality_score', 100.0))
+                schedulable = client._is_schedulable_for_demand(now)
+                health_score = round(
+                    min(float(runtime_health_score), quality_score)
+                    if schedulable and budget_decision.allowed else 0.0,
+                    1,
+                )
 
                 # User Info
                 allocation = client_to_user_info.get(client, None)
@@ -1503,6 +1534,9 @@ class AIClientManager:
                         "last_failure_reason": raw_status.get('last_failure_reason'),
                         "is_busy": client._is_busy(),
                         "health_score": health_score,
+                        "runtime_health_score": runtime_health_score,
+                        "quality_score": quality_score,
+                        "schedulable": schedulable and budget_decision.allowed,
                         "last_active_ts": raw_status.get('status_last_updated', 0.0),
                     },
                     "budget": {
@@ -1522,6 +1556,10 @@ class AIClientManager:
                         "error_count": err_count,
                         "error_sum": err_sum,
                         "circuit_open_count": raw_status.get('circuit_open_count', 0),
+                        "quality_feedback_count": raw_status.get('quality_feedback_count', 0),
+                        "quality_failure_count": raw_status.get('quality_failure_count', 0),
+                        "consecutive_quality_failures": raw_status.get(
+                            'consecutive_quality_failures', 0),
                         "error_rate_percent": round(err_rate, 1),
                         "last_chat_ts": raw_status.get('last_chat', 0),
                     },
@@ -1530,7 +1568,7 @@ class AIClientManager:
                 })
 
             # Sort: 1. By Priority (asc), 2. By Busy Status (busy first).
-            # Budget details are exposed separately and do not masquerade as runtime health.
+            # health_score 是面向运维界面的当前可用度；runtime_health_score 保留纯运行态口径。
             client_details.sort(key=lambda x: (
                 x['meta']['priority'],
                 not x['state']['is_busy'],
@@ -1602,6 +1640,20 @@ class AIClientManager:
     def get_call_observer(self):
         """Expose the optional generic call observer."""
         return getattr(self, "call_observer", None)
+
+    def report_client_feedback(
+            self, client: BaseAIClient, request_id: Optional[str], *,
+            valid: bool, labels: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """回填业务校验结果，并立即影响后续客户端排序。"""
+        client.record_quality_feedback(valid)
+        observer = self.get_call_observer()
+        if observer is not None and request_id:
+            try:
+                observer.feedback(request_id, valid=valid, labels=labels)
+            except Exception:
+                logger.exception("Failed to persist AI client quality feedback")
+        self.notify_waiters()
 
     @staticmethod
     def format_stats_report(stats_data: Dict[str, Any]) -> str:

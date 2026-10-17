@@ -317,7 +317,8 @@ class OpenAICompatibleAPI:
             # 3. 关键修改：细分错误类型，不要统统算作 PERMANENT
             # -----------------------------------------------------------
 
-            # A. 客户端侧错误 (400-499) -> 意味着 Prompt 有问题或 Auth 错误
+            # A. 客户端侧错误 (400-499)。HTTP 状态本身不足以判断责任方：
+            # 部分兼容服务会用 400 返回网关/推理后端故障，也会用 400 返回内容安全拒绝。
             # 这种错误说明：
             # 1. 链路通畅 (Client是好的)
             # 2. 参数错误/内容违规 (换个 Client 也没用，不要重试)
@@ -328,12 +329,33 @@ class OpenAICompatibleAPI:
                     message = f"Rate Limit Hit: {status}"
                     return _make_error_result("TRANSIENT_SERVER", error_code, message)
 
-                # 认证/权限/资源错误 (401/403/404) -> 账号级问题，换 Prompt 也没用，
+                # 认证/权限/资源错误 (401/403/404/410) -> 账号或模型级问题，换 Prompt 也没用，
                 # 归类为 PERMANENT，上层会将 Client 标记为 UNAVAILABLE
-                if status in (401, 403, 404):
+                if status in (401, 403, 404, 410):
                     error_code = f"HTTP_{status}"
                     message = f"Auth/Resource Error: {status} ({response.text[:100]})"
                     return _make_error_result("PERMANENT", error_code, message)
+
+                if status == 400:
+                    response_text = str(response.text or "")
+                    normalized = response_text.casefold()
+                    # NVIDIA 等兼容网关偶尔把内部函数路由故障包装成 400；这不是
+                    # 调用方输入错误，更不能据此把情报标为敏感内容。
+                    if "function id" in normalized or "function_id" in normalized:
+                        return _make_error_result(
+                            "TRANSIENT_SERVER", "HTTP_400_UPSTREAM",
+                            f"Upstream Function Error: 400 ({response_text[:100]})",
+                        )
+                    safety_markers = (
+                        "content policy", "content_policy", "content filter",
+                        "content_filter", "safety policy", "moderation",
+                        "sensitive content", "内容安全", "敏感内容",
+                    )
+                    if any(marker in normalized for marker in safety_markers):
+                        return _make_error_result(
+                            "BAD_REQUEST", "CONTENT_SAFETY",
+                            f"Content Safety Rejection: 400 ({response_text[:100]})",
+                        )
 
                 # 其他 4xx (如 400 内容违规/参数错误)
                 # 使用 "BAD_REQUEST" 类型，明确告知上层：别重试了，也没必要封禁 Client

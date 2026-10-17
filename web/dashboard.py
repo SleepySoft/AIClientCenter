@@ -183,13 +183,20 @@ FRONTEND_HTML = r"""
                         <td class="px-6 py-4 align-top w-64">
                             <div class="mb-2">
                                 <div class="flex justify-between text-xs mb-1">
-                                    <span>Health</span>
+                                    <span>Availability</span>
                                     <span class="font-bold">{{ client.state.health_score }}%</span>
                                 </div>
                                 <div class="w-full bg-gray-200 rounded-full h-2">
                                     <div class="h-2 rounded-full progress-bar" 
                                          :class="getHealthColor(client.state.health_score)"
                                          :style="{ width: client.state.health_score + '%' }"></div>
+                                </div>
+                                <div class="text-[10px] text-gray-500 flex justify-between">
+                                    <span>Runtime {{ client.state.runtime_health_score }}%</span>
+                                    <span>Quality {{ client.state.quality_score }}%</span>
+                                </div>
+                                <div v-if="!client.budget.admitted" class="text-[10px] text-red-600 mt-1 font-semibold">
+                                    QUOTA BLOCKED · {{ client.budget.reason }}
                                 </div>
                             </div>
                             <div v-if="client.metrics && client.metrics.length > 0" class="space-y-1">
