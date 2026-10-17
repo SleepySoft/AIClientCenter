@@ -36,6 +36,7 @@ def test_nvidia_builder_isolates_accounts_and_shares_each_account_limiter(tmp_pa
     assert len({id(client.rate_limiter) for client in account_b}) == 1
     assert account_a[0].rate_limiter is not account_b[0].rate_limiter
     assert account_a[0].group_id != account_b[0].group_id
+    assert account_a[0].priority == CLIENT_PRIORITY_FREEBIE
     assert nvidia_group_limits(clients) == {
         account_a[0].group_id: 1,
         account_b[0].group_id: 1,
@@ -43,9 +44,20 @@ def test_nvidia_builder_isolates_accounts_and_shares_each_account_limiter(tmp_pa
     snapshot = account_a[0].get_rate_limit_snapshot()
     assert snapshot["effective_limits"]["rpm"] == 24
     assert "nvapi-test" not in snapshot["storage_namespace"]
+    assert DEFAULT_MODELS == ("z-ai/glm-5.3",)
     assert "moonshotai/kimi-k3" not in DEFAULT_MODELS
     assert all(client.health_policy.failure_threshold == 1 for client in clients.values())
     assert all(client.health_policy.initial_backoff_sec == 300 for client in clients.values())
+    request = account_a[0].api._prepare_request_data(
+        messages=[{"role": "user", "content": "test"}],
+        temperature=0,
+        max_tokens=8192,
+    )
+    assert request["temperature"] == 1.0
+    assert request["top_p"] == 0.95
+    assert request["reasoning_effort"] == "low"
+    assert request["chat_template_kwargs"] == {"clear_thinking": True}
+    assert request["max_tokens"] == 4096
 
 
 def test_nvidia_builder_assigns_primary_and_reserve_priorities(monkeypatch, tmp_path):
@@ -61,9 +73,20 @@ def test_nvidia_builder_assigns_primary_and_reserve_priorities(monkeypatch, tmp_
     by_model = {client.get_current_model(): client for client in clients.values()}
 
     assert by_model["nvidia/nemotron-3-ultra-550b-a55b"].priority == (
-        CLIENT_PRIORITY_FREEBIE
+        CLIENT_PRIORITY_CONSUMABLES
     )
     assert by_model["z-ai/glm-5.3-flash"].priority == CLIENT_PRIORITY_CONSUMABLES
+    nemotron_request = by_model[
+        "nvidia/nemotron-3-ultra-550b-a55b"
+    ].api._prepare_request_data(
+        messages=[{"role": "user", "content": "test"}],
+        temperature=0,
+        max_tokens=8192,
+    )
+    assert nemotron_request["temperature"] == 1.0
+    assert nemotron_request["top_p"] == 0.95
+    assert nemotron_request["chat_template_kwargs"] == {"enable_thinking": False}
+    assert nemotron_request["max_tokens"] == 4096
 
 
 def test_nvidia_builder_rejects_unregistered_or_deprecated_model(monkeypatch, tmp_path):

@@ -141,7 +141,8 @@ class OpenAICompatibleAPI:
     """
 
     def __init__(self, api_base_url: str, token: Optional[str] = None,
-                 default_model: str = "gpt-3.5-turbo", proxies: dict = None):
+                 default_model: str = "gpt-3.5-turbo", proxies: dict = None,
+                 request_overrides: Optional[Dict[str, Any]] = None):
         """
         Args:
             api_base_url: The base endpoint (e.g., 'https://api.openai.com/v1').
@@ -154,6 +155,7 @@ class OpenAICompatibleAPI:
         self.default_model = default_model
         self.using_model = default_model
         self.proxies = proxies or {}
+        self.request_overrides = dict(request_overrides or {})
 
         # Thread-safe lock for token updates
         self.lock = threading.Lock()
@@ -595,6 +597,9 @@ class OpenAICompatibleAPI:
         """Standardizes the payload for OpenAI-compatible endpoints."""
         self.using_model = model or self.default_model
         request_data = {"model": self.using_model, **kwargs}
+        # Provider/model preset may override generic caller defaults such as temperature,
+        # reasoning effort and the hosted endpoint's practical output ceiling.
+        request_data.update(self.request_overrides)
         if messages:
             request_data["messages"] = messages
         return request_data
@@ -611,11 +616,13 @@ def create_ollama_client(model: Optional[str] = None):
     return client
 
 
-def create_nvidia_client(token: Optional[str] = None, model: Optional[str] = None):
+def create_nvidia_client(token: Optional[str] = None, model: Optional[str] = None,
+                         request_overrides: Optional[Dict[str, Any]] = None):
     client = OpenAICompatibleAPI(
         api_base_url='https://integrate.api.nvidia.com/v1',
         token=token or os.getenv("NVIDIA_API_KEY"),
-        default_model=model or 'moonshotai/kimi-k2.5'
+        default_model=model or 'z-ai/glm-5.3',
+        request_overrides=request_overrides,
     )
     return client
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from AIClientCenter.core.credentials import APIKeyConfig, resolve_api_keys
 from AIClientCenter.core.manager import (
@@ -28,31 +28,52 @@ DEFAULT_SAFETY_RATIO = 0.6
 class NvidiaModelSpec:
     priority: int
     note: str
+    request_overrides: dict[str, Any]
 
 
 # 仅登记当前 NVIDIA Build 标记为 Free Endpoint，且达到 IIS 大模型质量门槛的模型。
 # 模型上下线频繁；Deprecated 模型不得继续留在默认列表。
 NVIDIA_FREE_MODEL_SPECS: dict[str, NvidiaModelSpec] = {
     "nvidia/nemotron-3-ultra-550b-a55b": NvidiaModelSpec(
-        CLIENT_PRIORITY_FREEBIE,
-        "561B / 1M context; primary Event V4 extraction model",
+        CLIENT_PRIORITY_CONSUMABLES,
+        "561B / 1M context; unstable hosted backend, explicit opt-in only",
+        {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 4096,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     ),
     "z-ai/glm-5.3": NvidiaModelSpec(
         CLIENT_PRIORITY_FREEBIE,
-        "753B MoE / 1M context; primary multilingual model",
+        "753B MoE / 1M context; verified hosted default",
+        {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 4096,
+            "reasoning_effort": "low",
+            "chat_template_kwargs": {"clear_thinking": True},
+        },
     ),
     "z-ai/glm-5.3-flash": NvidiaModelSpec(
         CLIENT_PRIORITY_CONSUMABLES,
         "320B MoE; throughput-oriented reserve",
+        {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 4096,
+            "reasoning_effort": "low",
+            "chat_template_kwargs": {"clear_thinking": True},
+        },
     ),
     "deepseek-ai/deepseek-v4.1-flash": NvidiaModelSpec(
         CLIENT_PRIORITY_CONSUMABLES,
         "552B MoE / 8B active; experimental throughput reserve",
+        {"max_tokens": 4096},
     ),
 }
 
 DEFAULT_MODELS = (
-    "nvidia/nemotron-3-ultra-550b-a55b",
     "z-ai/glm-5.3",
 )
 
@@ -124,6 +145,7 @@ def build_nvidia_clients(
                 openai_api=create_nvidia_client(
                     token=credential.api_key,
                     model=model,
+                    request_overrides=spec.request_overrides,
                 ),
                 rate_limiter=limiter,
                 priority=spec.priority,
