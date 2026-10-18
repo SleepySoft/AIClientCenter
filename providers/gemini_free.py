@@ -88,6 +88,7 @@ def build_gemini_free_clients(
         reserve_slots: Optional[int] = None,
         safety_ratio: Optional[float] = None,
         storage_path: Optional[str] = None,
+        proxies: Optional[dict[str, str]] = None,
 ) -> dict[str, BaseAIClient]:
     credentials = resolve_api_keys(api_keys, env_name="GEMINI_API_KEY")
     if not credentials:
@@ -133,6 +134,7 @@ def build_gemini_free_clients(
                     openai_api=create_gemini_client(
                         token=credential.api_key,
                         model=model,
+                        proxies=proxies,
                     ),
                     rate_limiter=limiter,
                     priority=priorities[spec.tier],

@@ -7,6 +7,7 @@ from AIClientCenter.providers.openai_compatible import (
     create_mistral_client,
     create_openrouter_client,
 )
+from AIClientCenter.providers.gemini_free import build_gemini_free_clients
 
 
 @pytest.mark.parametrize(
@@ -50,3 +51,21 @@ def test_gemini_factory_has_no_implicit_local_proxy(monkeypatch):
         "http": "http://127.0.0.1:10809",
         "https": "http://127.0.0.1:10809",
     }
+
+
+def test_gemini_free_builder_passes_explicit_proxies(tmp_path):
+    proxies = {
+        "http": "http://127.0.0.1:7897",
+        "https": "http://127.0.0.1:7897",
+    }
+    clients = build_gemini_free_clients(
+        {"test": "test-key"},
+        models=["gemini-3.5-flash-lite"],
+        primary_slots=1,
+        reserve_slots=1,
+        storage_path=str(tmp_path / "limits.sqlite3"),
+        proxies=proxies,
+    )
+
+    assert len(clients) == 1
+    assert next(iter(clients.values())).api.proxies == proxies
