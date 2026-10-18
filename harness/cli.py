@@ -38,7 +38,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from AIClientCenter.core.result import APIResult
 from AIClientCenter.core.metrics import ClientMetricsMixin
-from AIClientCenter.core.budget import BudgetPolicy
+from AIClientCenter.core.budget import BudgetDecision, BudgetPolicy
+from AIClientCenter.harness.codex_usage import (
+    CodexUsageManager, CodexUsageSnapshot,
+)
 from AIClientCenter.core.manager import (
     BaseAIClient, ClientVisibility, CLIENT_PRIORITY_NORMAL, HealthPolicy,
 )
@@ -423,9 +426,36 @@ class CodexCLIClient(AgentCLIClient):
     SUPPORTS_SESSION = True
 
     def __init__(self, name: str, cli_command: str = 'codex',
-                 sandbox: str = 'read-only', **kwargs):
+                 sandbox: str = 'read-only',
+                 usage_guard: Optional[Dict[str, Any]] = None, **kwargs):
         self.sandbox = sandbox
+        guard_config = dict(usage_guard or {})
+        guard_enabled = guard_config.pop('enabled', True)
+        if not isinstance(guard_enabled, bool):
+            raise ValueError("usage_guard.enabled 必须是布尔值")
+        guard_config.setdefault('codex_command', cli_command)
+        self.codex_usage_manager = (
+            CodexUsageManager(**guard_config) if guard_enabled else None
+        )
         super().__init__(name=name, cli_command=cli_command, **kwargs)
+
+    def get_budget_decision(self) -> BudgetDecision:
+        decision = super().get_budget_decision()
+        if not decision.allowed or self.codex_usage_manager is None:
+            return decision
+        return self.codex_usage_manager.evaluate()
+
+    def get_standardized_metrics(self) -> List[Dict[str, Any]]:
+        metrics = super().get_standardized_metrics()
+        if self.codex_usage_manager is not None:
+            metrics.extend(self.codex_usage_manager.standardized_metrics())
+        return metrics
+
+    def get_codex_usage_snapshot(self) -> Optional[CodexUsageSnapshot]:
+        return (
+            self.codex_usage_manager.get_snapshot()
+            if self.codex_usage_manager is not None else None
+        )
 
     def _common_args(self, model: Optional[str], final_text_file: Optional[str]) -> List[str]:
         args = ['--json', '--skip-git-repo-check']
@@ -494,6 +524,9 @@ class CodexCLIClient(AgentCLIClient):
                         'total_tokens': u.get('input_tokens', 0) + u.get('output_tokens', 0),
                         'cached_input_tokens': u.get('cached_input_tokens', 0),
                     }
+                if self.codex_usage_manager is not None:
+                    self.codex_usage_manager.update_from_event(
+                        payload.get('rate_limits'))
             elif etype == 'event_msg' and payload.get('type') == 'task_complete':
                 last_agent_text = payload.get('last_agent_message') or last_agent_text
 

@@ -8,6 +8,11 @@ clients:
     enable: true
     mode: stateless
     sandbox: read-only
+    usage_guard:
+      reserve_percent: 20
+      namespace: default
+      refresh_seconds: 30
+      reset_grace_seconds: 30
 
   # 一个 Client 同时轮转多个模型和多个 Token。取消注释前先设置列出的环境变量。
   # - factory: self_rotating_openai

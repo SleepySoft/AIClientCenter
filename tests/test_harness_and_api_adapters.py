@@ -3,7 +3,7 @@ from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 
 
 def test_codex_jsonl_parser_supports_current_event_envelope():
-    client = CodexCLIClient(name="codex-test")
+    client = CodexCLIClient(name="codex-test", usage_guard={"enabled": False})
     stdout = "\n".join([
         '{"type":"session_meta","payload":{"session_id":"session-1"}}',
         ('{"type":"event_msg","payload":{"type":"item_completed","item":'
@@ -26,7 +26,7 @@ def test_codex_jsonl_parser_supports_current_event_envelope():
 
 
 def test_codex_jsonl_bad_request_is_not_misclassified_by_request_id_text():
-    client = CodexCLIClient(name="codex-test")
+    client = CodexCLIClient(name="codex-test", usage_guard={"enabled": False})
     stdout = (
         '{"type":"event_msg","payload":{"type":"task_complete","error":'
         '{"message":"{\\"error\\": {\\"code\\": \\"InvalidParameter\\", '

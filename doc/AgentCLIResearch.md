@@ -6,9 +6,12 @@
 旧 Codex JSONL 事件名称和“quota_config 驱动健康度”的描述已经过时。
 
 - 当前正式实现只有 CodexCLIClient 与 KimiCLIClient，代码位于 harness/cli.py。
-- 当前本机验证的 Codex CLI 为 0.160.0。适配器解析 session_meta 与 event_msg
+- 当前本机验证的 Codex CLI 为 0.162.1。适配器解析 session_meta 与 event_msg
   包装的 item_completed、token_count、task_complete 事件；应以适配器和
   tests/test_harness_and_api_adapters.py 为准。
+- Codex app-server 的稳定 `account/rateLimits/read` 方法提供 primary/secondary 窗口
+  百分比、窗口长度和重置时间，无需发起模型任务。CodexUsageManager 将快照持久化并
+  接入 BudgetDecision；`token_count.payload.rate_limits` 与本机 session 作为降级来源。
 - Harness 默认采用 unknown 预算策略，缺少余额信息不会被排除；如需本地控制，
   使用 BudgetPolicy 的 soft_limit 或 hard_limit，而非把额度映射为 runtime health。
 - Claude Code、Gemini CLI、Qwen Code、OpenCode、Aider 在下文只是扩展调研，
@@ -45,6 +48,8 @@
   - `{"type":"turn.completed","usage":{"input_tokens":N,"cached_input_tokens":M,"output_tokens":K,...}}` → 官方用量
 - **缓存验证**：续接第二轮实测 `cached_input_tokens=31872`，缓存机制确实生效。
 - 认证：走 `codex login` 的本机凭证（`~/.codex`），与 API Key 体系无关，天然绕开余额查询问题。
+- 套餐用量保护：`rate_limits.primary` 当前对应 300 分钟窗口，`secondary` 当前对应
+  10080 分钟窗口。适配器保存服务端百分比快照，不用 API token 价格估算订阅额度。
 
 ## Kimi CLI（已实测）
 
