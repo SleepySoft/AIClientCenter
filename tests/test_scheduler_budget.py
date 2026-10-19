@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 
@@ -55,6 +56,24 @@ def test_hard_budget_limit_blocks_client_and_allows_fallback():
     selected = manager.get_available_client("user")
 
     assert selected is fallback
+    manager.stop_monitoring()
+
+
+def test_expected_budget_rejection_is_debug_only(caplog):
+    manager = AIClientManager(first_check_delay_sec=9999)
+    blocked = SchedulingClient(
+        "blocked", 0, BudgetPolicy(BudgetMode.HARD_LIMIT, {"request_count": 0}),
+    )
+    manager.register_client(blocked)
+
+    with caplog.at_level(logging.INFO):
+        assert manager.get_available_client("normal-log") is None
+    assert "Skipping client blocked" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert manager.get_available_client("debug-log") is None
+    assert "Skipping client blocked" in caplog.text
     manager.stop_monitoring()
 
 

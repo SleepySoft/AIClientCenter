@@ -1266,7 +1266,9 @@ class AIClientManager:
             return None
         budget_decision = client.get_budget_decision()
         if not budget_decision.allowed:
-            logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
+            # 预算/额度门禁是正常调度分支；上层会输出节流后的容量摘要。
+            # 逐 Client 原因只在 DEBUG 保留，避免每轮等待刷屏。
+            logger.debug("Skipping client %s: %s", client_name, budget_decision.reason)
             return None
         if not client.can_accept_workload(
                 estimated_input_tokens=estimated_input_tokens,
@@ -1360,7 +1362,7 @@ class AIClientManager:
 
             budget_decision = client.get_budget_decision()
             if not budget_decision.allowed:
-                logger.info("Skipping client %s: %s", client_name, budget_decision.reason)
+                logger.debug("Skipping client %s: %s", client_name, budget_decision.reason)
                 continue
             if not client.can_accept_workload(
                     estimated_input_tokens=estimated_input_tokens,
