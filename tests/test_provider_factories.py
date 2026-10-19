@@ -8,6 +8,7 @@ from AIClientCenter.providers.openai_compatible import (
     create_openrouter_client,
 )
 from AIClientCenter.providers.gemini_free import build_gemini_free_clients
+from AIClientCenter.providers.openai_clients import create_openai_compatible_preset
 
 
 @pytest.mark.parametrize(
@@ -69,3 +70,23 @@ def test_gemini_free_builder_passes_explicit_proxies(tmp_path):
 
     assert len(clients) == 1
     assert next(iter(clients.values())).api.proxies == proxies
+
+
+def test_generic_preset_passes_provider_request_overrides(monkeypatch):
+    monkeypatch.setenv("PAID_API_KEY", "test-key")
+
+    client = create_openai_compatible_preset(
+        name="paid", group="paid", api_base_url="https://example.test/v1",
+        api_key_env="PAID_API_KEY", model="model-v1",
+        request_overrides={
+            "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
+        },
+    )
+
+    payload = client.api._prepare_request_data(
+        messages=[{"role": "user", "content": "return JSON"}],
+        temperature=0,
+    )
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["response_format"] == {"type": "json_object"}

@@ -302,11 +302,13 @@ def create_openai_compatible_preset(
         os.getenv(api_key_env) if api_key_env else None)
     if not token:
         raise ValueError("缺少 API Key；请配置 api_key 或 api_key_env。")
+    request_overrides = kwargs.pop("request_overrides", None)
     api = OpenAICompatibleAPI(
         api_base_url=api_base_url,
         token=token,
         default_model=model,
         proxies=dict(proxies or {}),
+        request_overrides=request_overrides,
     )
     return StandardOpenAIClient(
         name=name, group_id=group, openai_api=api, **kwargs)
