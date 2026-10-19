@@ -35,7 +35,7 @@ from AIClientCenter.core.manager import AIClientManager, BaseAIClient
 
 
 ClientFactory = Callable[..., BaseAIClient | Mapping[str, BaseAIClient]]
-RESERVED_FIELDS = frozenset({"factory", "name", "group", "enable"})
+RESERVED_FIELDS = frozenset({"factory", "name", "group", "enable", "tags"})
 
 
 def builtin_factories() -> dict[str, ClientFactory]:
@@ -188,11 +188,19 @@ class ClientFactoryEngine:
             raise ValueError(
                 f"{location} 工厂返回值不是 BaseAIClient 或 Client 映射。")
 
+        # tags：能力/敏感性标签（如 low_sensitivity/strong），不属于工厂构造参数，
+        # 由引擎在构造后直接挂载，供调度侧按标签过滤。
+        tags = entry.get("tags") or []
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            raise ValueError(f"{location}.tags 必须是字符串列表。")
+
         values = dict(result)
         built: dict[str, BaseAIClient] = {}
         for key, client in values.items():
             if not isinstance(client, BaseAIClient):
                 raise ValueError(f"{location} 工厂结果 {key!r} 不是 BaseAIClient。")
+            if tags:
+                client.tags = frozenset(t.strip() for t in tags if t.strip())
             if client.group_id != group:
                 raise ValueError(
                     f"{location} 生成的 {key!r} 分组为 {client.group_id!r}，"

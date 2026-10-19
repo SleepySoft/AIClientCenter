@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, Iterable, List
 
 from AIClientCenter.core.result import APIResult
 from AIClientCenter.core.state_logger import ClientStateSQLiteLogger
@@ -170,7 +170,8 @@ class BaseAIClient(ABC):
                  visibility: ClientVisibility = ClientVisibility.PUBLIC,
                  budget_policy: Optional[BudgetPolicy] = None,
                  health_policy: Optional[HealthPolicy] = None,
-                 observation_context: Optional[Dict[str, Any]] = None):
+                 observation_context: Optional[Dict[str, Any]] = None,
+                 tags: Optional[Iterable[str]] = None):
         """
         Initialize AI client with token and priority.
 
@@ -178,12 +179,15 @@ class BaseAIClient(ABC):
             name: The name of AI Client
             api_token: API token for authentication
             priority: Client priority (lower number = higher priority)
+            tags: 能力/特性标签（如 low_sensitivity 表示低敏感审查、strong 表示强模型），
+                供调度侧按标签过滤；默认空。
         """
         self.name = name
         self.api_token = api_token
         self.priority = priority
         self.group_id = group_id
         self.visibility = visibility
+        self.tags = frozenset(str(t).strip() for t in (tags or ()) if str(t).strip())
         # 预算是调度附加信息，不是 Client 的可执行状态。默认未知额度且不阻断。
         self.budget_policy = budget_policy or BudgetPolicy()
         self.health_policy = health_policy or HealthPolicy()
@@ -1112,6 +1116,7 @@ class AIClientManager:
                              estimated_input_tokens: Optional[int] = None,
                              max_tokens: Optional[int] = None,
                              avoid_client_names: Optional[set[str]] = None,
+                             required_tags: Optional[set[str]] = None,
                              ) -> Optional[BaseAIClient]:
         """
         Selects and acquires an *available* AI client for a given user, with optional
@@ -1238,7 +1243,7 @@ class AIClientManager:
             return self._get_available_client_by_conditions(
                 user_name, request_change, target_group_id, allow_private,
                 current_client, current_group_usage, estimated_input_tokens,
-                max_tokens, avoid_client_names or set())
+                max_tokens, avoid_client_names or set(), required_tags or set())
 
     def _get_available_client_by_name(self,
                                       user_name: str,
@@ -1310,6 +1315,7 @@ class AIClientManager:
                                             estimated_input_tokens: Optional[int],
                                             max_tokens: Optional[int],
                                             avoid_client_names: set[str],
+                                            required_tags: Optional[set[str]] = None,
                                             ) -> Optional[BaseAIClient]:
         # Soft budget limits keep the client available but rank it behind normal candidates.
         candidates = sorted(
@@ -1336,6 +1342,11 @@ class AIClientManager:
 
             # --- FILTER: Target Group ---
             if target_group_id and gid != target_group_id:
+                continue
+
+            # --- FILTER: Required Tags（能力/敏感性标签，如 low_sensitivity） ---
+            if required_tags and not set(required_tags).issubset(
+                    getattr(client, 'tags', frozenset())):
                 continue
 
             # --- FILTER: Request Change (Exclude Current) ---
