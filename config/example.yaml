@@ -9,7 +9,8 @@ clients:
     mode: stateless
     sandbox: read-only
     usage_guard:
-      reserve_percent: 20
+      primary_max_percent: 65
+      secondary_max_percent: 90
       namespace: default
       refresh_seconds: 30
       reset_grace_seconds: 30

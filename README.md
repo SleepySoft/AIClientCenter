@@ -43,7 +43,8 @@ clients:
     mode: stateless
     sandbox: read-only
     usage_guard:
-      reserve_percent: 20
+      primary_max_percent: 65
+      secondary_max_percent: 90
       namespace: default
       refresh_seconds: 30
       reset_grace_seconds: 30
@@ -54,9 +55,11 @@ group_limits:
 
 `usage_guard` 通过 Codex app-server 的 `account/rateLimits/read` 读取账号窗口快照，将
 `primary`（当前通常是 5 小时）和 `secondary`（当前通常是每周）百分比保存到
-`_data/codex_usage.sqlite3`。默认 `reserve_percent: 20`，即 IIS 在任一窗口用到 80%
-时暂停新任务，给人工/管理使用保留 20%；可用 `primary_max_percent` 和
-`secondary_max_percent` 单独覆盖。管理器直接采用服务端 `resetsAt`，并在重置点后保留
+`_data/codex_usage.sqlite3`。`primary_max_percent` 控制 5 小时窗口，
+`secondary_max_percent` 控制周窗口；上例分别在用到 65% 和 90% 时暂停新任务，即保留
+35% 的短窗口额度和 10% 的周额度。也可只设置 `reserve_percent`，为两个窗口指定相同的
+保留比例（默认 20%）。任一有效窗口达到各自上限都会停止分配。管理器直接采用服务端
+`resetsAt`，并在重置点后保留
 `reset_grace_seconds` 缓冲，随后自动恢复。官方接口不可用时才只读同步
 `~/.codex/sessions`；两种同步都不会发起模型请求。多个 Client 共用同一登录账号时应使用
 相同的 `namespace`。如确需关闭，可设置 `usage_guard.enabled: false`。
