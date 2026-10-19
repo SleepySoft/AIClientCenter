@@ -236,6 +236,8 @@ FRONTEND_HTML = r"""
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                              <div class="flex flex-col space-y-1">
                                 <span class="text-gray-600">Calls: <b>{{ client.runtime_stats.chat_count }}</b></span>
+                                <span class="text-gray-400" v-if="client.recent24h">近24h: <b>{{ client.recent24h.request_count }}</b> 调用 · 成功率 {{ client.recent24h.success_rate != null ? (client.recent24h.success_rate * 100).toFixed(0) + '%' : '-' }}</span>
+                                <span class="text-gray-400" v-else>近24h: 无记录</span>
                                 <span class="text-gray-600">
                                     Heat: 
                                     <b :class="getHeatClass(client.runtime_stats.error_count)">
@@ -1713,6 +1715,25 @@ class AIDashboardService:
             """Get system stats and inject current model info"""
             raw_stats = self.manager.get_client_stats()
 
+            # 持久观测库的近 24h 数据：runtime_stats 是进程内计数，重启归零；
+            # recent24h 来自 ai_calls 表，跨重启保留，供卡片展示“窗口期真实量”。
+            recent24h = {}
+            observer = (
+                self.manager.get_call_observer()
+                if hasattr(self.manager, "get_call_observer") else None
+            )
+            if observer:
+                try:
+                    until_ts = time.time()
+                    for row in observer.summarize(
+                            since_ts=until_ts - 24 * 3600, until_ts=until_ts,
+                            group_by=("client_name",)):
+                        name = row.get("client_name")
+                        if name:
+                            recent24h[str(name)] = row
+                except Exception:
+                    logger.exception("Failed to load 24h observation summary")
+
             # 使用 ai_core.py 中 Manager 的 get_client_by_name 和 BaseAIClient 的 get_current_model
             for client_data in raw_stats.get('clients', []):
                 c_name = client_data.get('meta', {}).get('name')
@@ -1727,6 +1748,7 @@ class AIDashboardService:
                     model_info = real_client.get_current_model()
 
                 client_data['meta']['current_model'] = model_info
+                client_data['recent24h'] = recent24h.get(str(c_name))
 
             serializable_stats = self._make_json_serializable(raw_stats)
             return jsonify(serializable_stats)
