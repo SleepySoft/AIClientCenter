@@ -13,6 +13,7 @@ import queue
 import sqlite3
 import subprocess
 import threading
+from datetime import datetime
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -241,16 +242,19 @@ class CodexUsageManager:
             ("primary", snapshot.primary, self.primary_max_percent),
             ("secondary", snapshot.secondary, self.secondary_max_percent),
         )
+        window_names = {"primary": "5小时窗口", "secondary": "周窗口"}
         for name, window, limit in checks:
             if window is None or self._window_expired(window, current):
                 continue
             if window.used_percent >= limit:
+                resume_at = datetime.fromtimestamp(
+                    window.resets_at + self.reset_grace_seconds).strftime("%m-%d %H:%M")
                 return BudgetDecision(
                     False,
                     0.0,
-                    f"codex_{name}_limit:{window.used_percent:.1f}%/{limit:.1f}%"
-                    f";resets_at={int(window.resets_at)}"
-                    f";resume_after={int(window.resets_at + self.reset_grace_seconds)}",
+                    # 前缀保持机器可解析（codex_*_limit:），后随人读文本
+                    f"codex_{name}_limit: {window_names.get(name, name)}已用 "
+                    f"{window.used_percent:.1f}%（上限 {limit:.1f}%），{resume_at} 恢复",
                 )
         return BudgetDecision(True)
 
