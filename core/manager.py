@@ -1138,6 +1138,20 @@ class AIClientManager:
                     continue
             if not client.get_budget_decision().allowed:
                 continue
+            schedule = getattr(client, 'availability_schedule', None)
+            if schedule is not None:
+                try:
+                    decision = schedule.evaluate(now)
+                    if not decision.allowed:
+                        delay = schedule.seconds_until_change(now)
+                        if delay is not None:
+                            delays.append(delay)
+                        continue
+                except Exception:
+                    logger.exception(
+                        "AI Client availability schedule evaluation failed: %s",
+                        getattr(client, 'name', 'Unknown'))
+                    continue
             delay = client._recovery_delay(now)
             if delay is not None:
                 delays.append(delay)
@@ -1157,6 +1171,8 @@ class AIClientManager:
         with self._lock:
             group_counts: Dict[Optional[str], int] = {}
             for client in self.clients:
+                if not self._is_schedule_available(client):
+                    continue
                 if not client._is_schedulable_for_demand():
                     continue
                 if not client.get_budget_decision().allowed:
@@ -1340,6 +1356,8 @@ class AIClientManager:
         client_status = client.get_status('status')
 
         # Runtime state and explicit budget policy are independent gates.
+        if not self._is_schedule_available(client):
+            return None
         if not client._is_schedulable_for_demand():
             return None
         budget_decision = client.get_budget_decision()
@@ -1435,6 +1453,8 @@ class AIClientManager:
                 continue
 
             # --- Standard Health Checks ---
+            if not self._is_schedule_available(client):
+                continue
             if not client._is_schedulable_for_demand():
                 continue
 
@@ -1513,6 +1533,21 @@ class AIClientManager:
         quality_penalty = (100.0 - quality_score) + quality_streak * 10.0
         return (getattr(client, 'priority', CLIENT_PRIORITY_NORMAL)
                 + penalty + runtime_penalty + quality_penalty + pressure * 0.01)
+
+    @staticmethod
+    def _is_schedule_available(client: BaseAIClient, now: Any = None) -> bool:
+        """检查 Client 的外部时间窗；未配置时始终允许。"""
+        schedule = getattr(client, 'availability_schedule', None)
+        if schedule is None:
+            return True
+        try:
+            return bool(schedule.evaluate(now).allowed)
+        except Exception:
+            # 配置装配阶段已经严格校验；运行期若自定义策略异常则 fail closed，
+            # 只隔离该 Client，不让异常逃逸到 IIS worker。
+            logger.exception("AI Client availability schedule evaluation failed: %s",
+                             getattr(client, 'name', 'Unknown'))
+            return False
 
     def release_client(self, client: BaseAIClient | str):
         """
@@ -1598,6 +1633,7 @@ class AIClientManager:
                 1 for c in self.clients
                 if c._is_schedulable_for_demand(now)
                 and c.get_budget_decision().allowed
+                and self._is_schedule_available(c, now)
             )
             busy_cnt = sum(1 for c in self.clients if c._is_busy())
             error_cnt_clients = sum(1 for c in self.clients if c.get_status('error_count') > 0)
@@ -1609,6 +1645,17 @@ class AIClientManager:
                     client.calculate_health() if hasattr(client, 'calculate_health') else 100
                 )
                 budget_decision = client.get_budget_decision()
+                schedule = getattr(client, 'availability_schedule', None)
+                try:
+                    schedule_detail = schedule.describe(now) if schedule else {
+                        "enabled": False, "allowed": True,
+                    }
+                except Exception as exc:
+                    schedule_detail = {
+                        "enabled": True,
+                        "allowed": False,
+                        "reason": f"schedule_evaluation_error:{type(exc).__name__}",
+                    }
                 budget_policy = getattr(client, 'budget_policy', None)
                 metrics_detail = client.get_standardized_metrics() if hasattr(client,
                                                                               'get_standardized_metrics') else {}
@@ -1618,7 +1665,10 @@ class AIClientManager:
                 # Access internal status directly for raw counters
                 raw_status = client._status
                 quality_score = float(raw_status.get('quality_score', 100.0))
-                schedulable = client._is_schedulable_for_demand(now)
+                schedulable = (
+                    client._is_schedulable_for_demand(now)
+                    and bool(schedule_detail.get("allowed"))
+                )
                 # 客户端自身健康与下游业务校验反馈是两种不同信号：
                 # Availability 只描述调用链是否可用；Quality 单独统计并用于调度避让。
                 health_score = round(
@@ -1681,6 +1731,7 @@ class AIClientManager:
                         "ranking_multiplier": budget_decision.ranking_multiplier,
                         "reason": budget_decision.reason,
                     },
+                    "availability": schedule_detail,
                     "allocation": {
                         "held_by": allocation['user'] if allocation else None,
                         "held_since": allocation['start_time'] if allocation else None,

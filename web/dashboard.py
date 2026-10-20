@@ -179,6 +179,13 @@ FRONTEND_HTML = r"""
 
                                 <div v-if="client.state.is_busy" class="text-xs text-yellow-600 mt-1 font-semibold animate-pulse">● IN USE</div>
 
+                                <div v-if="client.availability && client.availability.enabled"
+                                     class="text-[10px] mt-1 font-semibold px-1 rounded border"
+                                     :class="client.availability.allowed ? 'text-green-700 bg-green-50 border-green-200' : 'text-slate-600 bg-slate-100 border-slate-300'"
+                                     :title="scheduleTitle(client.availability)">
+                                    {{ client.availability.allowed ? 'SCHEDULE ACTIVE' : 'SCHEDULE PAUSED' }}
+                                </div>
+
                                 <div v-if="isBlockedByGroupLimit(client, group)" class="text-[10px] text-red-500 mt-1 font-bold border border-red-200 bg-red-50 px-1 rounded">
                                     BLOCKED BY LIMIT
                                 </div>
@@ -428,6 +435,11 @@ FRONTEND_HTML = r"""
             formatMetricKey(k) { return k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()); },
             formatNumber(n) { if (n >= 1000) return (n/1000).toFixed(1) + 'k'; return n; },
             formatDuration(s) { if (s < 60) return parseInt(s) + 's'; return parseInt(s / 60) + 'm'; },
+            scheduleTitle(schedule) {
+                if (!schedule) return '';
+                const next = schedule.next_change_at ? new Date(schedule.next_change_at * 1000).toLocaleString() : '-';
+                return `${schedule.mode || ''} · ${schedule.timezone || ''} · next: ${next}`;
+            },
             timeAgo(ts) { if (!ts) return '-'; const d = (Date.now()/1000) - ts; if (d < 60) return parseInt(d) + 's ago'; if (d < 3600) return parseInt(d/60) + 'm ago'; return parseInt(d/3600) + 'h ago'; }
         }
     }).mount('#app');

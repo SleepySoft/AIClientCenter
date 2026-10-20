@@ -1,6 +1,6 @@
-# Copy to config.yaml. The loader consumes factory/name/group/enable; all other keys
-# are passed directly to the selected provider preset. A custom factory may be
-# referenced as "my_package.clients:create_client" without editing the engine.
+# Copy to config.yaml. The loader consumes common factory/name/group/enable/tags/
+# availability fields; provider-specific keys are passed to the selected preset.
+# A custom factory may be referenced as "my_package.clients:create_client".
 clients:
   - factory: codex
     name: Codex CLI Stateless
@@ -8,6 +8,14 @@ clients:
     enable: true
     mode: stateless
     sandbox: read-only
+    # 仅允许 IIS 在北京时间夜间调度；跨午夜窗口归属于开始日。
+    availability:
+      timezone: Asia/Shanghai
+      mode: available
+      periods:
+        - days: [mon, tue, wed, thu, fri, sat, sun]
+          start: "22:00"
+          end: "07:00"
     usage_guard:
       primary_max_percent: 65
       secondary_max_percent: 90

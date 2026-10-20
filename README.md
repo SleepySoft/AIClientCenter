@@ -53,6 +53,25 @@ group_limits:
   codex_cli: 1
 ```
 
+所有 Client 都可配置由外部 `AIClientManager` 检查的周时间窗。例如白天把 Codex
+留给人工、每天只在北京时间 22:00 至次日 07:00 允许 IIS 分配：
+
+```yaml
+availability:
+  timezone: Asia/Shanghai
+  mode: available
+  periods:
+    - days: [mon, tue, wed, thu, fri, sat, sun]
+      start: "22:00"
+      end: "07:00"
+```
+
+`mode: available` 表示仅列出的窗口可调度；`mode: unavailable` 表示仅列出的窗口
+暂停调度。时间采用 `HH:MM`，星期使用 `mon` 至 `sun`；跨午夜窗口归属于开始日，
+例如 `mon 22:00→07:00` 会覆盖周二凌晨。必须显式提供 IANA 时区，避免部署机器时区
+改变行为。时间窗只限制新任务，已经取得 Client 的调用不会被中断；计划性暂停也不会
+修改 Client 的健康状态。修改配置后可通过 IIS 面板的 `Reload Config` 原子生效。
+
 `usage_guard` 通过 Codex app-server 的 `account/rateLimits/read` 读取账号窗口快照，将
 `primary`（当前通常是 5 小时）和 `secondary`（当前通常是每周）百分比保存到
 `_data/codex_usage.sqlite3`。`primary_max_percent` 控制 5 小时窗口，
@@ -64,7 +83,7 @@ group_limits:
 `~/.codex/sessions`；两种同步都不会发起模型请求。多个 Client 共用同一登录账号时应使用
 相同的 `namespace`。如确需关闭，可设置 `usage_guard.enabled: false`。
 
-配置工厂引擎只消费 `factory`、`name`、`group`、`enable`，其余字段直接作为关键字参数传给
+配置工厂引擎消费 `factory`、`name`、`group`、`enable`、`tags`、`availability`，其余字段直接作为关键字参数传给
 `providers/` 中对应的预置构造函数。这里的 `providers/` 同时包含两部分：底层协议/
 厂商适配器，以及供配置引擎调用、名称以 `_preset` 结尾的组装函数。用户实现自定义
 工厂时，可直接参考这些 `create_*_preset()` 的参数和返回方式。内置短名称包括 `codex`、`kimi`、

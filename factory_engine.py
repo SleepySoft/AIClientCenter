@@ -13,9 +13,9 @@
    ``ClientFactoryEngine({"custom": create_client}).load(config_path)``。
 
 自定义工厂必须接受关键字参数 ``name``、``group`` 以及自己的配置参数，并返回一个
-``BaseAIClient`` 或 ``Mapping[str, BaseAIClient]``。YAML 中除
-factory/name/group/enable 外的字段会原样作为关键字参数传入工厂；``enable`` 默认为
-``true``，设为 ``false`` 时保留配置但不创建 Client。
+``BaseAIClient`` 或 ``Mapping[str, BaseAIClient]``。YAML 中的 ``tags`` 与
+``availability`` 由外部调度器消费，不传给工厂；其余非公共字段原样传入工厂。
+``enable`` 默认为 ``true``，设为 ``false`` 时保留配置但不创建 Client。
 """
 
 from __future__ import annotations
@@ -33,10 +33,13 @@ from typing import Any
 import yaml
 
 from AIClientCenter.core.manager import AIClientManager, BaseAIClient
+from AIClientCenter.core.availability import ClientAvailabilitySchedule
 
 
 ClientFactory = Callable[..., BaseAIClient | Mapping[str, BaseAIClient]]
-RESERVED_FIELDS = frozenset({"factory", "name", "group", "enable", "tags"})
+RESERVED_FIELDS = frozenset({
+    "factory", "name", "group", "enable", "tags", "availability",
+})
 
 
 def builtin_factories() -> dict[str, ClientFactory]:
@@ -204,6 +207,11 @@ class ClientFactoryEngine:
         tags = entry.get("tags") or []
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
             raise ValueError(f"{location}.tags 必须是字符串列表。")
+        try:
+            availability = ClientAvailabilitySchedule.from_config(
+                entry.get("availability"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{location}.{exc}") from exc
 
         values = dict(result)
         built: dict[str, BaseAIClient] = {}
@@ -212,6 +220,8 @@ class ClientFactoryEngine:
                 raise ValueError(f"{location} 工厂结果 {key!r} 不是 BaseAIClient。")
             if tags:
                 client.tags = frozenset(t.strip() for t in tags if t.strip())
+            if availability is not None:
+                client.availability_schedule = availability
             if client.group_id != group:
                 raise ValueError(
                     f"{location} 生成的 {key!r} 分组为 {client.group_id!r}，"
