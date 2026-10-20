@@ -309,6 +309,11 @@ def validate_config(clients, group_limits):
                 warnings.append(f"Client {client.name!r} 被预算阻断: {decision.reason}")
         except Exception as exc:
             errors.append(f"Client {client.name!r} 的预算策略无效: {exc}")
+        schedule = getattr(client, "availability_schedule", None)
+        if schedule is not None and not getattr(schedule, "timezone_explicit", True):
+            warnings.append(
+                f"Client {client.name!r} 的 availability 未配置 timezone，"
+                f"使用系统本地时区 {schedule.timezone_name!r}。")
     for group in sorted(groups.difference(group_limits)):
         errors.append(f"Client 分组 {group!r} 未配置并发限制。")
     for group in sorted(set(group_limits).difference(groups)):

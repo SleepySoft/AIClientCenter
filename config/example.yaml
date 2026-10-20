@@ -8,14 +8,9 @@ clients:
     enable: true
     mode: stateless
     sandbox: read-only
-    # 仅允许 IIS 在北京时间夜间调度；跨午夜窗口归属于开始日。
+    # 仅允许 IIS 在夜间调度。timezone 省略时使用系统本地时区并输出 warning。
     availability:
-      timezone: Asia/Shanghai
-      mode: available
-      periods:
-        - days: [mon, tue, wed, thu, fri, sat, sun]
-          start: "22:00"
-          end: "07:00"
+      available: "22:00-07:00"
     usage_guard:
       primary_max_percent: 65
       secondary_max_percent: 90

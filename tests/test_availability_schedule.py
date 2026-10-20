@@ -6,26 +6,21 @@ import pytest
 
 from AIClientCenter.core.availability import ClientAvailabilitySchedule
 from AIClientCenter.core.manager import AIClientManager, BaseAIClient, ClientStatus
-from AIClientCenter.factory_engine import load_config
+from AIClientCenter.factory_engine import load_config, validate_config
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
-def _schedule(mode="available", *, days=None, start="22:00", end="07:00"):
-    return ClientAvailabilitySchedule.from_config({
-        "timezone": "Asia/Shanghai",
-        "mode": mode,
-        "periods": [{
-            "days": days or ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-            "start": start,
-            "end": end,
-        }],
-    })
+def _schedule(mode="available", period="22:00-07:00", *, timezone=True):
+    config = {mode: period}
+    if timezone:
+        config["timezone"] = "Asia/Shanghai"
+    return ClientAvailabilitySchedule.from_config(config)
 
 
 def test_available_window_supports_cross_midnight_and_next_change():
-    schedule = _schedule(days=["mon"])
+    schedule = _schedule()
 
     before = schedule.evaluate(datetime(2026, 10, 19, 21, 0, tzinfo=SHANGHAI))
     during_evening = schedule.evaluate(datetime(2026, 10, 19, 23, 0, tzinfo=SHANGHAI))
@@ -40,24 +35,27 @@ def test_available_window_supports_cross_midnight_and_next_change():
 
 
 def test_unavailable_window_only_blocks_matching_period():
-    schedule = _schedule(
-        "unavailable", days=["mon", "tue", "wed", "thu", "fri"],
-        start="08:00", end="18:00")
+    schedule = _schedule("unavailable", "08:00-18:00")
 
     assert schedule.evaluate(datetime(2026, 10, 19, 12, 0, tzinfo=SHANGHAI)).allowed is False
     assert schedule.evaluate(datetime(2026, 10, 19, 18, 0, tzinfo=SHANGHAI)).allowed is True
-    assert schedule.evaluate(datetime(2026, 10, 24, 12, 0, tzinfo=SHANGHAI)).allowed is True
+
+
+def test_multiple_daily_periods_are_supported():
+    schedule = _schedule(period=["00:00-02:00", "22:00-23:59"])
+
+    assert schedule.evaluate(datetime(2026, 10, 19, 1, 0, tzinfo=SHANGHAI)).allowed is True
+    assert schedule.evaluate(datetime(2026, 10, 19, 12, 0, tzinfo=SHANGHAI)).allowed is False
+    assert schedule.evaluate(datetime(2026, 10, 19, 22, 30, tzinfo=SHANGHAI)).allowed is True
 
 
 @pytest.mark.parametrize("config", [
-    {"timezone": "Invalid/Zone", "mode": "available", "periods": []},
-    {"timezone": "Asia/Shanghai", "mode": "sometimes", "periods": []},
-    {"timezone": "Asia/Shanghai", "mode": "available", "periods": [
-        {"start": "8:00", "end": "18:00"},
-    ]},
-    {"timezone": "Asia/Shanghai", "mode": "available", "periods": [
-        {"start": "08:00", "end": "08:00"},
-    ]},
+    {"timezone": "Invalid/Zone", "available": "22:00-07:00"},
+    {"timezone": "Asia/Shanghai"},
+    {"available": "22:00-07:00", "unavailable": "07:00-22:00"},
+    {"available": "8:00-18:00"},
+    {"available": "08:00-08:00"},
+    {"available": []},
 ])
 def test_invalid_schedule_config_is_rejected(config):
     with pytest.raises(ValueError):
@@ -80,7 +78,7 @@ def _strict_factory(*, name, group):
     return ScheduleClient(name=name, group_id=group)
 
 
-def test_factory_attaches_schedule_without_passing_it_to_provider(tmp_path):
+def test_factory_attaches_simple_schedule_without_passing_it_to_provider(tmp_path):
     path = tmp_path / "clients.yaml"
     path.write_text(
         "clients:\n"
@@ -88,18 +86,40 @@ def test_factory_attaches_schedule_without_passing_it_to_provider(tmp_path):
         "    name: night\n"
         "    group: codex\n"
         "    availability:\n"
-        "      timezone: Asia/Shanghai\n"
-        "      mode: available\n"
-        "      periods:\n"
-        "        - {days: [mon, tue, wed, thu, fri, sat, sun], start: '22:00', end: '07:00'}\n"
+        "      available: '22:00-07:00'\n"
         "group_limits:\n"
         "  codex: 1\n",
         encoding="utf-8",
     )
 
-    clients, _ = load_config(
+    clients, limits = load_config(
         path, factories={"strict": _strict_factory}, include_builtins=False)
-    assert clients["night"].availability_schedule.mode == "available"
+    errors, warnings = validate_config(clients, limits)
+
+    schedule = clients["night"].availability_schedule
+    assert schedule.mode == "available"
+    assert schedule.timezone_explicit is False
+    assert schedule.timezone_name
+    assert errors == []
+    assert any(schedule.timezone_name in warning for warning in warnings)
+    assert any("系统本地时区" in warning for warning in warnings)
+
+
+def test_explicit_timezone_does_not_emit_local_timezone_warning(tmp_path):
+    path = tmp_path / "clients.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: strict\n"
+        "    name: night\n"
+        "    group: codex\n"
+        "    availability: {timezone: Asia/Shanghai, available: '22:00-07:00'}\n"
+        "group_limits: {codex: 1}\n",
+        encoding="utf-8",
+    )
+    clients, limits = load_config(
+        path, factories={"strict": _strict_factory}, include_builtins=False)
+    _, warnings = validate_config(clients, limits)
+    assert not any("系统本地时区" in warning for warning in warnings)
 
 
 def test_manager_excludes_schedule_paused_client_without_changing_health():

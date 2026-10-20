@@ -53,23 +53,19 @@ group_limits:
   codex_cli: 1
 ```
 
-所有 Client 都可配置由外部 `AIClientManager` 检查的周时间窗。例如白天把 Codex
-留给人工、每天只在北京时间 22:00 至次日 07:00 允许 IIS 分配：
+所有 Client 都可配置由外部 `AIClientManager` 检查的每日时间窗。例如白天把 Codex
+留给人工、每天只在本地时间 22:00 至次日 07:00 允许 IIS 分配：
 
 ```yaml
 availability:
-  timezone: Asia/Shanghai
-  mode: available
-  periods:
-    - days: [mon, tue, wed, thu, fri, sat, sun]
-      start: "22:00"
-      end: "07:00"
+  available: "22:00-07:00"
 ```
 
-`mode: available` 表示仅列出的窗口可调度；`mode: unavailable` 表示仅列出的窗口
-暂停调度。时间采用 `HH:MM`，星期使用 `mon` 至 `sun`；跨午夜窗口归属于开始日，
-例如 `mon 22:00→07:00` 会覆盖周二凌晨。必须显式提供 IANA 时区，避免部署机器时区
-改变行为。时间窗只限制新任务，已经取得 Client 的调用不会被中断；计划性暂停也不会
+`available` 表示仅窗口内可调度；也可改成 `unavailable: "07:00-22:00"` 表示仅窗口内
+暂停调度。时间采用 `HH:MM-HH:MM` 并支持跨午夜。`timezone` 可选，省略时使用系统
+本地时区，启动和重载时会输出 warning，明确实际采用的时区；需要固定部署行为时可增加
+`timezone: Asia/Shanghai`。目前不区分星期，每天使用相同时间窗；多个每日时间窗可写成
+字符串列表。时间窗只限制新任务，已经取得 Client 的调用不会被中断；计划性暂停也不会
 修改 Client 的健康状态。修改配置后可通过 IIS 面板的 `Reload Config` 原子生效。
 
 `usage_guard` 通过 Codex app-server 的 `account/rateLimits/read` 读取账号窗口快照，将

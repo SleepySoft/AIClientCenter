@@ -1,26 +1,19 @@
-"""AI Client 的周时间窗调度策略。
+"""AI Client 的每日时间窗调度策略。
 
 策略只由外部 ``AIClientManager`` 检查，不修改 ClientStatus，也不会中断已经开始的调用。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+import os
 import re
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-WEEKDAYS = {
-    "mon": 0, "monday": 0,
-    "tue": 1, "tuesday": 1,
-    "wed": 2, "wednesday": 2,
-    "thu": 3, "thursday": 3,
-    "fri": 4, "friday": 4,
-    "sat": 5, "saturday": 5,
-    "sun": 6, "sunday": 6,
-}
 @dataclass(frozen=True)
 class AvailabilityDecision:
     allowed: bool
@@ -29,42 +22,71 @@ class AvailabilityDecision:
 
 
 @dataclass(frozen=True)
-class WeeklyPeriod:
-    days: frozenset[int]
+class DailyPeriod:
     start: time
     end: time
 
-    def bounds_for(self, start_date: date, timezone: ZoneInfo) -> tuple[datetime, datetime]:
-        start_at = datetime.combine(start_date, self.start, tzinfo=timezone)
+    def bounds_for(self, start_date: date, target_timezone: tzinfo) -> tuple[datetime, datetime]:
+        start_at = datetime.combine(start_date, self.start, tzinfo=target_timezone)
         end_date = start_date + timedelta(days=1) if self.end <= self.start else start_date
-        end_at = datetime.combine(end_date, self.end, tzinfo=timezone)
+        end_at = datetime.combine(end_date, self.end, tzinfo=target_timezone)
         return start_at, end_at
 
     def contains(self, instant: datetime) -> bool:
-        # 跨午夜窗口属于其开始日，例如 mon 22:00→07:00 覆盖周二凌晨。
         for start_date in (instant.date(), instant.date() - timedelta(days=1)):
-            if start_date.weekday() not in self.days:
-                continue
             start_at, end_at = self.bounds_for(start_date, instant.tzinfo)
             if start_at <= instant < end_at:
                 return True
         return False
 
 
-class ClientAvailabilitySchedule:
-    """按 IANA 时区计算的每周可用或不可用时间段。"""
+def resolve_local_timezone() -> tuple[tzinfo, str]:
+    """解析系统本地时区，并尽量保留可确认的 IANA 名称。"""
+    candidates = []
+    env_timezone = str(os.getenv("TZ") or "").strip().lstrip(":")
+    if env_timezone:
+        candidates.append(env_timezone)
+    try:
+        configured = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+        if configured:
+            candidates.append(configured)
+    except OSError:
+        pass
+    try:
+        resolved = str(Path("/etc/localtime").resolve())
+        marker = "/zoneinfo/"
+        if marker in resolved:
+            candidates.append(resolved.split(marker, 1)[1])
+    except OSError:
+        pass
 
-    def __init__(self, *, mode: str, timezone: ZoneInfo,
-                 periods: Iterable[WeeklyPeriod], enabled: bool = True):
-        normalized_mode = str(mode).strip().lower()
-        if normalized_mode not in {"available", "unavailable"}:
-            raise ValueError("availability.mode 必须是 available 或 unavailable。")
-        self.mode = normalized_mode
-        self.timezone = timezone
+    for name in candidates:
+        try:
+            return ZoneInfo(name), name
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+
+    local = datetime.now().astimezone().tzinfo or timezone.utc
+    name = getattr(local, "key", None) or str(local) or "UTC"
+    return local, name
+
+
+class ClientAvailabilitySchedule:
+    """按指定或系统本地时区计算的每日可用/不可用时间段。"""
+
+    def __init__(self, *, mode: str, target_timezone: tzinfo,
+                 timezone_name: str, periods: Iterable[DailyPeriod],
+                 timezone_explicit: bool):
+        if mode not in {"available", "unavailable"}:
+            raise ValueError("availability 必须配置 available 或 unavailable。")
+        self.mode = mode
+        self.timezone = target_timezone
+        self.timezone_name = timezone_name
+        self.timezone_explicit = timezone_explicit
         self.periods = tuple(periods)
-        self.enabled = bool(enabled)
-        if self.enabled and not self.periods:
-            raise ValueError("availability.periods 启用时不能为空。")
+        self.enabled = True
+        if not self.periods:
+            raise ValueError(f"availability.{mode} 不能为空。")
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None) -> "ClientAvailabilitySchedule | None":
@@ -72,72 +94,71 @@ class ClientAvailabilitySchedule:
             return None
         if not isinstance(config, dict):
             raise ValueError("availability 必须是对象。")
-        unknown = set(config).difference({"enabled", "timezone", "mode", "periods"})
+        unknown = set(config).difference({"timezone", "available", "unavailable"})
         if unknown:
             raise ValueError("availability 含未知字段: " + ", ".join(sorted(unknown)))
 
-        enabled = config.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise ValueError("availability.enabled 必须是布尔值。")
-        if not enabled:
-            return None
-        timezone_name = config.get("timezone")
-        if not isinstance(timezone_name, str) or not timezone_name.strip():
-            raise ValueError("availability.timezone 必须是显式 IANA 时区名称。")
-        try:
-            timezone = ZoneInfo(timezone_name.strip())
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"availability.timezone 不存在: {timezone_name!r}。") from exc
+        configured_modes = [key for key in ("available", "unavailable") if key in config]
+        if len(configured_modes) != 1:
+            raise ValueError("availability 必须且只能配置 available 或 unavailable 之一。")
+        mode = configured_modes[0]
+        periods = cls._parse_periods(config[mode], f"availability.{mode}")
 
-        mode = config.get("mode")
-        if not isinstance(mode, str):
-            raise ValueError("availability.mode 必须是 available 或 unavailable。")
-        raw_periods = config.get("periods")
-        if not isinstance(raw_periods, list):
-            raise ValueError("availability.periods 必须是列表。")
-        periods = [cls._parse_period(item, index) for index, item in enumerate(raw_periods)]
-        return cls(mode=mode, timezone=timezone, periods=periods, enabled=enabled)
+        raw_timezone = config.get("timezone")
+        if raw_timezone is None:
+            target_timezone, timezone_name = resolve_local_timezone()
+            timezone_explicit = False
+        else:
+            if not isinstance(raw_timezone, str) or not raw_timezone.strip():
+                raise ValueError("availability.timezone 必须是 IANA 时区名称。")
+            timezone_name = raw_timezone.strip()
+            try:
+                target_timezone = ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError(
+                    f"availability.timezone 不存在: {timezone_name!r}。") from exc
+            timezone_explicit = True
 
-    @staticmethod
-    def _parse_period(raw: Any, index: int) -> WeeklyPeriod:
-        location = f"availability.periods[{index}]"
-        if not isinstance(raw, dict):
-            raise ValueError(f"{location} 必须是对象。")
-        unknown = set(raw).difference({"days", "start", "end"})
-        if unknown:
-            raise ValueError(f"{location} 含未知字段: " + ", ".join(sorted(unknown)))
-        raw_days = raw.get("days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])
-        if not isinstance(raw_days, list) or not raw_days:
-            raise ValueError(f"{location}.days 必须是非空列表。")
-        days = set()
-        for raw_day in raw_days:
-            day = WEEKDAYS.get(str(raw_day).strip().lower())
-            if day is None:
-                raise ValueError(f"{location}.days 含无效星期: {raw_day!r}。")
-            days.add(day)
-        start = ClientAvailabilitySchedule._parse_time(raw.get("start"), f"{location}.start")
-        end = ClientAvailabilitySchedule._parse_time(raw.get("end"), f"{location}.end")
-        if start == end:
-            raise ValueError(f"{location} 的 start 与 end 不能相同。")
-        return WeeklyPeriod(frozenset(days), start, end)
+        return cls(
+            mode=mode,
+            target_timezone=target_timezone,
+            timezone_name=timezone_name,
+            periods=periods,
+            timezone_explicit=timezone_explicit,
+        )
+
+    @classmethod
+    def _parse_periods(cls, raw: Any, location: str) -> list[DailyPeriod]:
+        values = [raw] if isinstance(raw, str) else raw
+        if not isinstance(values, list) or not values:
+            raise ValueError(f"{location} 必须是时间段字符串或非空列表。")
+        return [cls._parse_period(value, f"{location}[{index}]")
+                for index, value in enumerate(values)]
 
     @staticmethod
-    def _parse_time(raw: Any, location: str) -> time:
+    def _parse_period(raw: Any, location: str) -> DailyPeriod:
         if not isinstance(raw, str):
-            raise ValueError(f"{location} 必须是 HH:MM。")
-        if re.fullmatch(r"\d{2}:\d{2}", raw.strip()) is None:
-            raise ValueError(f"{location} 必须是 HH:MM。")
+            raise ValueError(f"{location} 必须是 HH:MM-HH:MM。")
+        match = re.fullmatch(r"(\d{2}:\d{2})-(\d{2}:\d{2})", raw.strip())
+        if match is None:
+            raise ValueError(f"{location} 必须是 HH:MM-HH:MM。")
+        start = ClientAvailabilitySchedule._parse_time(match.group(1), location)
+        end = ClientAvailabilitySchedule._parse_time(match.group(2), location)
+        if start == end:
+            raise ValueError(f"{location} 的开始和结束时间不能相同。")
+        return DailyPeriod(start, end)
+
+    @staticmethod
+    def _parse_time(raw: str, location: str) -> time:
         try:
-            parsed = time.fromisoformat(raw.strip())
+            parsed = time.fromisoformat(raw)
         except ValueError as exc:
-            raise ValueError(f"{location} 必须是 HH:MM。") from exc
+            raise ValueError(f"{location} 必须是有效的 HH:MM-HH:MM。") from exc
         if parsed.second or parsed.microsecond or parsed.tzinfo is not None:
-            raise ValueError(f"{location} 只允许 HH:MM。")
+            raise ValueError(f"{location} 只允许分钟精度。")
         return parsed
 
     def evaluate(self, now: datetime | float | None = None) -> AvailabilityDecision:
-        if not self.enabled:
-            return AvailabilityDecision(True)
         instant = self._as_local_datetime(now)
         inside = any(period.contains(instant) for period in self.periods)
         allowed = inside if self.mode == "available" else not inside
@@ -164,11 +185,9 @@ class ClientAvailabilitySchedule:
 
     def _next_change_at(self, instant: datetime, current_allowed: bool) -> float | None:
         candidates: set[datetime] = set()
-        for offset in range(-1, 9):
+        for offset in range(-1, 3):
             start_date = instant.date() + timedelta(days=offset)
             for period in self.periods:
-                if start_date.weekday() not in period.days:
-                    continue
                 candidates.update(period.bounds_for(start_date, self.timezone))
         for boundary in sorted(candidate for candidate in candidates if candidate > instant):
             after = boundary + timedelta(microseconds=1)
@@ -188,9 +207,10 @@ class ClientAvailabilitySchedule:
     def describe(self, now: datetime | float | None = None) -> dict[str, Any]:
         decision = self.evaluate(now)
         return {
-            "enabled": self.enabled,
+            "enabled": True,
             "mode": self.mode,
-            "timezone": self.timezone.key,
+            "timezone": self.timezone_name,
+            "timezone_explicit": self.timezone_explicit,
             "allowed": decision.allowed,
             "reason": decision.reason,
             "next_change_at": decision.next_change_at,
