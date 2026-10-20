@@ -14,6 +14,8 @@ import threading
 import random
 import json
 import uuid
+import asyncio
+import inspect
 from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
@@ -985,6 +987,11 @@ class AIClientManager:
         self.state_logger = state_logger
         self.call_observer = call_observer
 
+        # Client 配置热重载只替换池内容，不替换 Manager 本身。这样所有已经注入
+        # Manager 的业务组件都保持有效；generation 仅供控制面确认切换结果。
+        self._pool_generation = 0
+        self._retired_clients: Dict[int, Any] = {}
+
     def register_client(self, client: Any):
         """
         Register a new AI client.
@@ -1014,6 +1021,73 @@ class AIClientManager:
             self.group_limits[group_id] = limit
             logger.info(f"Set concurrency limit for group '{group_id}' to {limit}")
             self._availability.notify_all()
+
+    def replace_client_pool(self, clients: Any,
+                            group_limits: Dict[str, int]) -> Dict[str, Any]:
+        """原子替换可调度 Client 池，并保留在途任务的旧 Client 引用。
+
+        新 Client 必须在调用本方法前完成构造和配置校验。替换期间持有 Manager
+        的条件锁，因此调度方只会看到完整的旧池或完整的新池，不会观察到空窗。
+        ``user_client_map`` 不在这里清空：已取得旧 Client 的任务仍可正常结束并
+        通过 ``release_client`` 释放它。
+        """
+        new_clients = list(clients.values()) if isinstance(clients, dict) else list(clients)
+        new_clients.sort(key=lambda item: item.priority)
+        new_limits = dict(group_limits)
+
+        with self._availability:
+            old_clients = list(self.clients)
+            for client in new_clients:
+                try:
+                    if self.state_logger:
+                        self.state_logger.attach_client(client)
+                except Exception:
+                    logger.exception("Failed to attach state logger to reloaded client %s",
+                                     getattr(client, 'name', 'Unknown'))
+                try:
+                    if self.call_observer:
+                        self.call_observer.attach_client(client)
+                except Exception:
+                    logger.exception("Failed to attach call observer to reloaded client %s",
+                                     getattr(client, 'name', 'Unknown'))
+
+            self.clients = new_clients
+            self.group_limits = new_limits
+            self._pool_generation += 1
+            active_old = sum(
+                1 for client in old_clients
+                if any(info.get('client') is client for info in self.user_client_map.values())
+            )
+            active_old_ids = {
+                id(info.get('client')) for info in self.user_client_map.values()
+            }
+            new_client_ids = {id(client) for client in new_clients}
+            retired_now = []
+            for client in old_clients:
+                if id(client) in new_client_ids:
+                    continue
+                if id(client) in active_old_ids:
+                    self._retired_clients[id(client)] = client
+                else:
+                    retired_now.append(client)
+            self._availability.notify_all()
+
+        for client in retired_now:
+            self._dispose_client(client)
+
+        logger.info(
+            "AI Client pool reloaded: generation=%d, old=%d, new=%d, "
+            "old_inflight=%d, group_limits=%d",
+            self._pool_generation, len(old_clients), len(new_clients),
+            active_old, len(new_limits),
+        )
+        return {
+            "generation": self._pool_generation,
+            "old_client_count": len(old_clients),
+            "client_count": len(new_clients),
+            "old_inflight_count": active_old,
+            "group_limit_count": len(new_limits),
+        }
 
     def wait_for_available_client(self,
                                   user_name: str,
@@ -1212,10 +1286,14 @@ class AIClientManager:
             current_allocation = self.user_client_map.get(user_name)
             current_client = current_allocation['client'] if current_allocation else None
 
-            # 2. Cleanup: If current client is effectively dead, release it first
-            if current_client and (current_client not in self.clients or
-                                   current_client.get_status('status') in [ClientStatus.ERROR,
-                                                                           ClientStatus.UNAVAILABLE]):
+            # 2. 热重载后旧 Client 可能仍承载在途调用。即使同一 user_name 意外
+            # 再次请求，也不能替它释放物理锁；原调用完成后会走 release_client。
+            if current_client and current_client not in self.clients:
+                return None
+
+            # 仅清理由当前池自身判定为不可用的分配。
+            if current_client and current_client.get_status('status') in [
+                    ClientStatus.ERROR, ClientStatus.UNAVAILABLE]:
                 self._release_user_resources(user_name)
                 current_client = None
 
@@ -1441,13 +1519,49 @@ class AIClientManager:
         Release the client currently held by the specified user.
         This should be called when the user session ends or they want to free resources.
         """
+        retired_clients = []
         with self._lock:
             keys_to_remove = [k for k, v in self.user_client_map.items() if v['client'] == client] \
                 if isinstance(client, BaseAIClient) else [str(client)]
+            released_clients = [
+                self.user_client_map[key]['client'] for key in keys_to_remove
+                if key in self.user_client_map
+            ]
             for key in keys_to_remove:
                 self._release_user_resources(key)
             if keys_to_remove:
                 self._availability.notify_all()
+            for released_client in released_clients:
+                retired = self._retired_clients.pop(id(released_client), None)
+                if retired is not None:
+                    retired_clients.append(retired)
+        for retired in retired_clients:
+            self._dispose_client(retired)
+
+    @staticmethod
+    def _dispose_client(client: Any) -> None:
+        """尽力释放退出调度池的 Client 资源，清理失败不进入业务调用链。"""
+        close = getattr(client, 'close', None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                def run_close():
+                    try:
+                        asyncio.run(result)
+                    except Exception:
+                        logger.exception("Failed to asynchronously close retired client %s",
+                                         getattr(client, 'name', 'Unknown'))
+
+                threading.Thread(
+                    target=run_close,
+                    name=f"AIClientDispose-{getattr(client, 'name', 'Unknown')}",
+                    daemon=True,
+                ).start()
+        except Exception:
+            logger.exception("Failed to close retired client %s",
+                             getattr(client, 'name', 'Unknown'))
 
     def _release_client_core(self, client: Any):
         """Internal helper to release the physical client lock."""

@@ -165,3 +165,40 @@ def test_observation_api_rejects_unbounded_or_unknown_slices(tmp_path):
         "/dashboard/api/observations?hours=99999"
     ).status_code == 400
     manager.stop_monitoring()
+
+
+def test_reload_config_endpoint_reports_success_and_failure_without_replacing_manager():
+    manager = AIClientManager(first_check_delay_sec=9999)
+    manager.register_client(DashboardClient())
+
+    class Reloader:
+        def __init__(self):
+            self.fail = False
+
+        def reload(self):
+            if self.fail:
+                raise ValueError("invalid test config")
+            return {
+                "generation": 1,
+                "client_count": 1,
+                "warnings": [],
+            }
+
+    reloader = Reloader()
+    app = Flask(__name__)
+    AIDashboardService(
+        manager, config_reloader=reloader).mount_to_app(app, "/dashboard")
+    test_client = app.test_client()
+
+    overview = test_client.get("/dashboard/api/overview")
+    success = test_client.post("/dashboard/api/reload-config")
+    assert overview.get_json()["summary"]["config_reload_enabled"] is True
+    assert success.status_code == 200
+    assert success.get_json()["generation"] == 1
+
+    reloader.fail = True
+    failed = test_client.post("/dashboard/api/reload-config")
+    assert failed.status_code == 400
+    assert "invalid test config" in failed.get_json()["error"]
+    assert manager.get_client_by_name("dashboard-client") is not None
+    manager.stop_monitoring()

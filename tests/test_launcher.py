@@ -6,7 +6,8 @@ from AIClientCenter.cli.launcher import (
     resolve_config_path,
 )
 from AIClientCenter.factory_engine import (
-    ClientFactoryEngine, build_manager, load_config, validate_config,
+    AIClientConfigReloader, ClientFactoryEngine, build_manager, load_config,
+    validate_config,
 )
 from AIClientCenter.core.budget import BudgetMode, BudgetPolicy
 from AIClientCenter.core.manager import BaseAIClient, ClientStatus
@@ -226,6 +227,62 @@ def test_build_manager_registers_clients_and_group_limits():
     manager = build_manager({"one": client}, {"default": 1})
     assert manager.get_client_by_name("launcher-client") is client
     assert manager.group_limits == {"default": 1}
+    manager.stop_monitoring()
+
+
+def test_config_reloader_atomically_rebuilds_pool_and_preserves_inflight(tmp_path):
+    old_client = LauncherClient(name="old", group_id="default")
+    manager = build_manager({"old": old_client}, {"default": 1})
+    assert manager.get_available_client("inflight") is old_client
+
+    path = tmp_path / "clients.yaml"
+    path.write_text(
+        "clients:\n"
+        "  - factory: launcher\n"
+        "    name: new\n"
+        "    group: default\n"
+        "group_limits:\n"
+        "  default: 1\n",
+        encoding="utf-8",
+    )
+    result = AIClientConfigReloader(
+        manager, path, factories={"launcher": _factory},
+        include_builtins=False).reload()
+
+    assert result["generation"] == 1
+    assert result["old_inflight_count"] == 1
+    assert [client.name for client in manager.clients] == ["new"]
+    assert manager.get_available_client("inflight") is None
+    assert old_client._is_acquired() is True
+    # 旧调用仍占用原分组额度；热切换不会让并发限制瞬时失效。
+    assert manager.get_available_client("next") is None
+
+    manager.release_client("inflight")
+    selected = manager.get_available_client("next")
+    assert selected is not None
+    assert selected.name == "new"
+    manager.release_client(selected)
+    manager.stop_monitoring()
+
+
+def test_config_reloader_keeps_current_pool_when_new_config_is_empty(tmp_path):
+    old_client = LauncherClient(name="old", group_id="default")
+    manager = build_manager({"old": old_client}, {"default": 1})
+    path = tmp_path / "clients.yaml"
+    path.write_text("clients: []\ngroup_limits: {}\n", encoding="utf-8")
+
+    reloader = AIClientConfigReloader(
+        manager, path, include_builtins=False)
+    try:
+        reloader.reload()
+    except ValueError as exc:
+        assert "没有生成任何 Client" in str(exc)
+    else:
+        raise AssertionError("empty reload must be rejected")
+
+    assert manager.clients == [old_client]
+    assert manager.group_limits == {"default": 1}
+    assert manager._pool_generation == 0
     manager.stop_monitoring()
 
 

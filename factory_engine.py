@@ -25,6 +25,7 @@ import importlib
 import importlib.util
 import sys
 import types
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -147,13 +148,23 @@ class ClientFactoryEngine:
             raise ValueError("clients 必须是列表。")
 
         clients: dict[str, BaseAIClient] = {}
-        for index, entry in enumerate(entries):
-            built = self._build_entry(entry, index, config_dir=path.parent)
-            duplicate = clients.keys() & built.keys()
-            if duplicate:
-                raise ValueError("AI Client 名称重复: " + ", ".join(sorted(duplicate)))
-            clients.update(built)
-        return clients, _group_limits(raw.get("group_limits") or {})
+        built: dict[str, BaseAIClient] = {}
+        try:
+            for index, entry in enumerate(entries):
+                built = self._build_entry(entry, index, config_dir=path.parent)
+                duplicate = clients.keys() & built.keys()
+                if duplicate:
+                    raise ValueError("AI Client 名称重复: " + ", ".join(sorted(duplicate)))
+                clients.update(built)
+                built = {}
+            group_limits = _group_limits(raw.get("group_limits") or {})
+        except Exception:
+            # 热重载在构造完整配置前失败时，这批对象永远不会进入 Manager；
+            # 及时关闭已创建的 Session/连接，且不触碰当前生产池。
+            for client in [*clients.values(), *built.values()]:
+                AIClientManager._dispose_client(client)
+            raise
+        return clients, group_limits
 
     def _build_entry(
             self, entry: Any, index: int, *, config_dir: Path,
@@ -211,10 +222,11 @@ class ClientFactoryEngine:
         return built
 
 
-def load_config(config_path, *, factories=None):
+def load_config(config_path, *, factories=None, include_builtins=True):
     """使用内置预置及可选外部工厂加载配置。"""
 
-    return ClientFactoryEngine(factories).load(config_path)
+    return ClientFactoryEngine(
+        factories, include_builtins=include_builtins).load(config_path)
 
 
 def _is_python_file_reference(source: str) -> bool:
@@ -313,3 +325,51 @@ def build_manager_from_config(
     if errors:
         raise ValueError("AI Client 配置无效: " + "; ".join(errors))
     return build_manager(clients, group_limits, **manager_kwargs)
+
+
+class ReloadInProgressError(RuntimeError):
+    """同一 Manager 已有配置重载正在执行。"""
+
+
+class AIClientConfigReloader:
+    """从 YAML 重建全部 Client，并在成功后原子切换 Manager 的 Client 池。"""
+
+    def __init__(self, manager, config_path, *, factories=None,
+                 allow_empty: bool = False, include_builtins: bool = True):
+        self.manager = manager
+        self.config_path = Path(config_path).expanduser().resolve()
+        self.factories = factories
+        self.allow_empty = allow_empty
+        self.include_builtins = include_builtins
+        self._reload_lock = threading.Lock()
+
+    def reload(self) -> dict[str, Any]:
+        # 防止用户连点导致并行构造两套 Client（部分自定义工厂可能启动线程）。
+        if not self._reload_lock.acquire(blocking=False):
+            raise ReloadInProgressError("AI Client 配置正在重新加载，请稍后重试。")
+        clients = None
+        try:
+            # 所有可能失败的 IO、YAML 解析、工厂构造和校验均在 Manager 锁外完成。
+            # 任何异常都会保留当前池，不影响 IIS 的现有调用。
+            clients, group_limits = load_config(
+                self.config_path,
+                factories=self.factories,
+                include_builtins=self.include_builtins,
+            )
+            errors, warnings = validate_config(clients, group_limits)
+            if errors:
+                for client in clients.values():
+                    self.manager._dispose_client(client)
+                raise ValueError("AI Client 配置无效: " + "; ".join(errors))
+            if not clients and not self.allow_empty:
+                raise ValueError(
+                    "AI Client 配置没有生成任何 Client；已保留当前 Client 池。")
+
+            result = self.manager.replace_client_pool(clients, group_limits)
+            result.update({
+                "config_path": str(self.config_path),
+                "warnings": warnings,
+            })
+            return result
+        finally:
+            self._reload_lock.release()

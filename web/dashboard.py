@@ -12,6 +12,7 @@ from AIClientCenter.core.manager import (
     AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL,
 )
 from AIClientCenter.web.observation_page import OBSERVATION_HTML
+from AIClientCenter.factory_engine import ReloadInProgressError
 
 
 logger = logging.getLogger("AIDashboard")
@@ -56,6 +57,9 @@ FRONTEND_HTML = r"""
             <p class="text-sm text-gray-500 mt-1">Last Updated: {{ lastUpdated }}</p>
         </div>
         <div class="flex space-x-4">
+          <button v-if="stats.summary && stats.summary.config_reload_enabled" @click="reloadClients" :disabled="reloading" class="px-4 py-2 bg-amber-50 text-amber-800 border border-amber-200 rounded shadow hover:bg-amber-100 disabled:opacity-50 text-sm">
+            <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': reloading}"></i> Reload Config
+          </button>
           <button @click="fetchData" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
             <i class="fa-solid fa-rotate-right" :class="{'fa-spin': loading}"></i> Refresh
           </button>
@@ -288,7 +292,7 @@ FRONTEND_HTML = r"""
 <script>
     const { createApp } = Vue;
     createApp({
-        data() { return { stats: { summary: null, clients: [] }, loading: false, lastUpdated: '-', timer: null } },
+        data() { return { stats: { summary: null, clients: [] }, loading: false, reloading: false, lastUpdated: '-', timer: null } },
         mounted() { this.fetchData(); this.timer = setInterval(this.fetchData, 2000); },
         computed: {
             // 核心逻辑：将 flat list 转换为按 group 聚合的对象
@@ -336,6 +340,22 @@ FRONTEND_HTML = r"""
             }
         },
         methods: {
+            async reloadClients() {
+                if(!confirm('Reload ai_clients.yaml and rebuild every AI Client? In-flight calls will continue on their existing Client.')) return;
+                this.reloading = true;
+                try {
+                    const res = await fetch('api/reload-config', { method: 'POST' });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || res.statusText);
+                    const warning = data.warnings && data.warnings.length ? `\nWarnings: ${data.warnings.join('; ')}` : '';
+                    alert(`Reloaded ${data.client_count} clients (generation ${data.generation}).${warning}`);
+                    await this.fetchData();
+                } catch (e) {
+                    alert(`Reload failed; current clients were kept.\n${e.message}`);
+                } finally {
+                    this.reloading = false;
+                }
+            },
             async fetchData() {
                 try {
                     const res = await fetch('api/overview');
@@ -1562,10 +1582,12 @@ class AIDashboardService:
     Flask-compatible dashboard service for AI Client Manager.
     """
 
-    def __init__(self, manager: AIClientManager, enable_manual_calls: bool = False):
+    def __init__(self, manager: AIClientManager, enable_manual_calls: bool = False,
+                 config_reloader: Any = None):
         self.manager = manager
         # 手动调用会产生真实成本；嵌入业务服务时应配合认证包装器再显式开启。
         self.enable_manual_calls = enable_manual_calls
+        self.config_reloader = config_reloader
         self._is_registered = False
 
     def _make_json_serializable(self, obj: Any) -> Any:
@@ -1714,6 +1736,8 @@ class AIDashboardService:
         def get_overview():
             """Get system stats and inject current model info"""
             raw_stats = self.manager.get_client_stats()
+            raw_stats.setdefault('summary', {})['config_reload_enabled'] = (
+                self.config_reloader is not None)
 
             # 持久观测库的近 24h 数据：runtime_stats 是进程内计数，重启归零；
             # recent24h 来自 ai_calls 表，跨重启保留，供卡片展示“窗口期真实量”。
@@ -1752,6 +1776,29 @@ class AIDashboardService:
 
             serializable_stats = self._make_json_serializable(raw_stats)
             return jsonify(serializable_stats)
+
+        @bp.route('/api/reload-config', methods=['POST'])
+        @maybe_wrap
+        def reload_config():
+            """重新读取 YAML、重建全部 Client，并在成功后原子切换。"""
+            if self.config_reloader is None:
+                return jsonify({"error": "AI Client config reload is not configured."}), 501
+            try:
+                result = self.config_reloader.reload()
+                for warning in result.get("warnings", []):
+                    logger.warning("AI Client reload warning: %s", warning)
+                return jsonify(self._make_json_serializable(result))
+            except ReloadInProgressError as exc:
+                logger.warning("AI Client config reload rejected: %s", exc)
+                return jsonify({"error": str(exc)}), 409
+            except (OSError, ValueError) as exc:
+                logger.error("AI Client config reload failed; current pool kept: %s", exc)
+                return jsonify({"error": str(exc)}), 400
+            except Exception as exc:
+                logger.exception("AI Client config reload failed; current pool kept")
+                return jsonify({
+                    "error": f"{type(exc).__name__}: {exc}",
+                }), 500
 
         @bp.route('/timeline', methods=['GET'])
         @maybe_wrap

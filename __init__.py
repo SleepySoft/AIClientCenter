@@ -1,6 +1,7 @@
 """AI Client management, provider adapters, and local harness integration."""
 
 from AIClientCenter.factory_engine import (
+    AIClientConfigReloader,
     ClientFactoryEngine,
     builtin_factories,
     build_manager,
@@ -10,6 +11,7 @@ from AIClientCenter.factory_engine import (
 )
 
 __all__ = [
+    "AIClientConfigReloader",
     "ClientFactoryEngine",
     "builtin_factories",
     "build_manager",

@@ -151,6 +151,13 @@ Harness CLI 路径，不会自动发送模型请求。首次找不到该文件�
 可能消耗 API 或 Harness 套餐额度。非本机监听必须显式加 --allow-remote，并自行
 提供访问控制；也可传入 --disable-manual-calls 禁用真实调用。
 
+IIS 内嵌的登录保护面板 `/monitor/ai-client-dashboard/` 还提供 `Reload Config`：
+它会重新读取 `_config/ai_clients.yaml` 并重建全部 Client。配置读取、工厂构造或校验
+失败时继续使用旧池；成功时在同一个 `AIClientManager` 内原子切换，新任务使用新池，
+已经开始的调用继续使用旧 Client，完成后才释放其连接。空 Client 配置会被拒绝，连续
+点击产生的并发重载返回 409，不会清空或阻塞当前池。对应受保护接口为
+`POST /monitor/ai-client-dashboard/api/reload-config`。
+
 ## 目录导航
 
 | 路径 | 用途 |
