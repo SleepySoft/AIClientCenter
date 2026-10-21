@@ -47,6 +47,8 @@ class ObservedClient(BaseAIClient):
                 "prompt_tokens": 12,
                 "completion_tokens": 4,
                 "total_tokens": 16,
+                "prompt_tokens_details": {"cached_tokens": 8},
+                "completion_tokens_details": {"reasoning_tokens": 2},
             }
         return {"success": True, "data": data, "error": None}
 
@@ -75,6 +77,9 @@ def test_observer_records_generic_call_metrics_and_optional_feedback(tmp_path):
     assert row["reported_input_tokens"] == 12
     assert row["reported_output_tokens"] == 4
     assert row["reported_total_tokens"] == 16
+    assert row["cached_input_tokens"] == 8
+    assert row["uncached_input_tokens"] == 4
+    assert row["reasoning_output_tokens"] == 2
     assert row["token_source"] == "reported"
     assert any(event["type"] == "chat_end" for event in side_events)
 
@@ -113,6 +118,7 @@ def test_observer_records_failed_calls_without_affecting_client_result(tmp_path)
     row = observer.query_calls()[0]
 
     assert response["error"] == "unified_api_error"
+    assert response["_ai_client_meta"]["request_id"] == row["request_id"]
     assert row["success"] is False
     assert row["error_type"] == "TRANSIENT_SERVER"
     assert row["error_code"] == "HTTP_503"
@@ -138,4 +144,6 @@ def test_observer_summarizes_by_safe_dimensions(tmp_path):
     assert summary[0]["success_rate"] == 1.0
     assert summary[0]["input_tokens"] == 12
     assert summary[0]["output_tokens"] == 4
+    assert summary[0]["cached_input_tokens"] == 8
+    assert summary[0]["uncached_input_tokens"] == 4
     assert summary[0]["feedback_valid_rate"] == 1.0

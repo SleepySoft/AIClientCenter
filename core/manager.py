@@ -76,6 +76,23 @@ def _response_observation(response: Any) -> Dict[str, Any]:
     reported_input = _optional_usage_int(usage, "prompt_tokens", "input_tokens")
     reported_output = _optional_usage_int(usage, "completion_tokens", "output_tokens")
     reported_total = _optional_usage_int(usage, "total_tokens")
+    prompt_details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    )
+    completion_details = (
+        usage.get("completion_tokens_details")
+        if isinstance(usage.get("completion_tokens_details"), dict) else {}
+    )
+    cached_input = _optional_usage_int(
+        usage, "prompt_cache_hit_tokens", "cached_input_tokens")
+    if cached_input is None:
+        cached_input = _optional_usage_int(prompt_details, "cached_tokens")
+    uncached_input = _optional_usage_int(usage, "prompt_cache_miss_tokens")
+    if uncached_input is None and reported_input is not None and cached_input is not None:
+        uncached_input = max(0, reported_input - cached_input)
+    reasoning_output = _optional_usage_int(
+        completion_details, "reasoning_tokens")
     reported = any(
         value is not None
         for value in (reported_input, reported_output, reported_total)
@@ -86,6 +103,9 @@ def _response_observation(response: Any) -> Dict[str, Any]:
         "reported_input_tokens": reported_input,
         "reported_output_tokens": reported_output,
         "reported_total_tokens": reported_total,
+        "cached_input_tokens": cached_input,
+        "uncached_input_tokens": uncached_input,
+        "reasoning_output_tokens": reasoning_output,
         "token_source": "reported" if reported else "estimated",
         "finish_reason": first_choice.get("finish_reason"),
     }
@@ -331,16 +351,29 @@ class BaseAIClient(ABC):
 
             if error_data:
                 # Delegate to the unified error handler
-                return self._handle_unified_error(error_data)
+                response_data = self._handle_unified_error(error_data)
+                if isinstance(response_data, dict):
+                    response_data.setdefault(
+                        "_ai_client_meta", {})["request_id"] = request_id
+                return response_data
 
             # 3. Unknown failure mode (should not happen if API_CORE is working)
             logger.error(f"Unknown APIResult structure: {result}")
-            return self._handle_exception(ValueError("API client returned an ambiguous result."))
+            response_data = self._handle_exception(
+                ValueError("API client returned an ambiguous result."))
+            if isinstance(response_data, dict):
+                response_data.setdefault(
+                    "_ai_client_meta", {})["request_id"] = request_id
+            return response_data
 
         except Exception as e:
             final_error = {"type": "EXCEPTION", "code": '', "message": str(e)}
             # Catches errors happening outside of the API call (e.g., locking issue, subclass error)
-            return self._handle_exception(e)
+            response_data = self._handle_exception(e)
+            if isinstance(response_data, dict):
+                response_data.setdefault(
+                    "_ai_client_meta", {})["request_id"] = request_id
+            return response_data
 
         finally:
             with self._lock:

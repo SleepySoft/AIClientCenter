@@ -64,6 +64,9 @@ class CallObservationSQLiteLogger:
                     reported_input_tokens INTEGER,
                     reported_output_tokens INTEGER,
                     reported_total_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    uncached_input_tokens INTEGER,
+                    reasoning_output_tokens INTEGER,
                     token_source TEXT NOT NULL,
                     finish_reason TEXT,
                     error_type TEXT,
@@ -75,6 +78,16 @@ class CallObservationSQLiteLogger:
                 )
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(ai_calls)")
+            }
+            for name in (
+                "cached_input_tokens", "uncached_input_tokens",
+                "reasoning_output_tokens",
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE ai_calls ADD COLUMN {name} INTEGER")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ai_calls_time ON ai_calls(started_at)"
             )
@@ -126,6 +139,9 @@ class CallObservationSQLiteLogger:
             _optional_non_negative_int(event.get("reported_input_tokens")),
             _optional_non_negative_int(event.get("reported_output_tokens")),
             _optional_non_negative_int(event.get("reported_total_tokens")),
+            _optional_non_negative_int(event.get("cached_input_tokens")),
+            _optional_non_negative_int(event.get("uncached_input_tokens")),
+            _optional_non_negative_int(event.get("reasoning_output_tokens")),
             str(event.get("token_source") or "estimated"),
             _optional_text(event.get("finish_reason")),
             _optional_text(error.get("type") or event.get("error_type")),
@@ -140,9 +156,11 @@ class CallObservationSQLiteLogger:
                     elapsed_ms, logical_input_bytes, logical_output_bytes,
                     estimated_input_tokens, estimated_output_tokens,
                     reported_input_tokens, reported_output_tokens,
-                    reported_total_tokens, token_source, finish_reason,
+                    reported_total_tokens, cached_input_tokens,
+                    uncached_input_tokens, reasoning_output_tokens,
+                    token_source, finish_reason,
                     error_type, error_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 row,
             )
@@ -245,6 +263,9 @@ class CallObservationSQLiteLogger:
                     AS input_tokens,
                 SUM(COALESCE(reported_output_tokens, estimated_output_tokens, 0))
                     AS output_tokens,
+                SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
+                SUM(COALESCE(uncached_input_tokens, 0)) AS uncached_input_tokens,
+                SUM(COALESCE(reasoning_output_tokens, 0)) AS reasoning_output_tokens,
                 AVG(elapsed_ms) AS average_elapsed_ms,
                 SUM(CASE WHEN token_source = 'reported' THEN 1 ELSE 0 END)
                     AS reported_token_calls,
