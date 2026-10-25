@@ -61,6 +61,9 @@ FRONTEND_HTML = r"""
           <button v-if="stats.summary && stats.summary.config_reload_enabled" @click="reloadClients" :disabled="reloading" class="px-4 py-2 bg-amber-50 text-amber-800 border border-amber-200 rounded shadow hover:bg-amber-100 disabled:opacity-50 text-sm">
             <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': reloading}"></i> Reload Config
           </button>
+          <button v-if="stats.summary && stats.summary.config_reload_enabled" onclick="window.location.href='config/'" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
+            <i class="fa-solid fa-gear mr-1"></i> Edit Config
+          </button>
           <button @click="fetchData" class="px-4 py-2 bg-white border rounded shadow hover:bg-gray-50 text-sm">
             <i class="fa-solid fa-rotate-right" :class="{'fa-spin': loading}"></i> Refresh
           </button>
