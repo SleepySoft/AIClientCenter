@@ -2,6 +2,7 @@ import time
 import logging
 import threading
 import uuid
+import secrets
 from enum import Enum
 from typing import Optional, Callable, Any
 from flask import Flask, Blueprint, jsonify, request, Response
@@ -1595,11 +1596,15 @@ class AIDashboardService:
     """
 
     def __init__(self, manager: AIClientManager, enable_manual_calls: bool = False,
-                 config_reloader: Any = None):
+                 config_reloader: Any = None,
+                 enable_config_editor: bool = True,
+                 configuration_service: Any = None):
         self.manager = manager
         # 手动调用会产生真实成本；嵌入业务服务时应配合认证包装器再显式开启。
         self.enable_manual_calls = enable_manual_calls
         self.config_reloader = config_reloader
+        self.enable_config_editor = enable_config_editor
+        self.configuration_service = configuration_service
         self._is_registered = False
 
     def _make_json_serializable(self, obj: Any) -> Any:
@@ -1972,6 +1977,25 @@ class AIDashboardService:
 
         bp = self.create_blueprint(wrapper)
         app.register_blueprint(bp, url_prefix=url_prefix)
+        can_build_service = (self.config_reloader is not None
+                             and hasattr(self.config_reloader, "config_path"))
+        if self.enable_config_editor and (self.configuration_service or can_build_service):
+            from AIClientCenter.configuration import AIClientConfigurationService
+            from AIClientCenter.web.configuration import AIClientConfigurationWeb
+            configuration_service = self.configuration_service
+            if configuration_service is None:
+                configuration_service = AIClientConfigurationService(
+                    self.config_reloader.config_path,
+                    factories=self.config_reloader.factories,
+                    include_builtins=self.config_reloader.include_builtins,
+                )
+            AIClientConfigurationWeb(
+                configuration_service,
+                reloader=self.config_reloader,
+            ).mount_to_app(
+                app, url_prefix=f"{url_prefix.rstrip('/')}/config",
+                wrapper=wrapper,
+            )
         self._is_registered = True
         logger.info(f"AI Dashboard mounted at {url_prefix}")
         return True
@@ -1979,6 +2003,7 @@ class AIDashboardService:
     def run_standalone(self, host="0.0.0.0", port=8000, debug=False):
         """Run as a standalone Flask app."""
         app = Flask(__name__)
+        app.secret_key = secrets.token_bytes(32)
         self.mount_to_app(app, url_prefix="")
         print(f"Starting standalone dashboard at http://{host}:{port}")
         app.run(host=host, port=port, debug=debug)

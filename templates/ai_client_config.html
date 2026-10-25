@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="{{ ui_locale|default('en') }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ _('AI client configuration') }}</title>
+  <style>
+    :root{color-scheme:light dark;font:15px/1.5 system-ui,sans-serif}body{margin:0;background:#f4f6f8;color:#18212f}
+    main{max-width:1100px;margin:auto;padding:24px}.bar,.card{background:white;border:1px solid #d9e0e8;border-radius:12px;padding:18px;margin-bottom:16px}
+    h1,h2{margin:.1em 0 .5em}.muted{color:#667085}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    label{display:block;font-weight:650}input,select,textarea{box-sizing:border-box;width:100%;margin-top:5px;padding:9px;border:1px solid #b8c2cf;border-radius:7px;background:white;color:#18212f}
+    textarea{font:13px/1.45 ui-monospace,monospace;min-height:110px}.yaml{min-height:520px}.actions{display:flex;gap:8px;flex-wrap:wrap}
+    button{border:0;border-radius:7px;padding:9px 14px;cursor:pointer;background:#315efb;color:white}button.secondary{background:#e8edf5;color:#18212f}button.danger{background:#b42318}
+    .client{border:1px solid #e1e6ed;border-radius:9px;padding:14px;margin-top:12px}.status{white-space:pre-wrap;padding:10px;border-radius:7px;background:#edf2f7}.bad{background:#fee4e2;color:#912018}.good{background:#dcfae6;color:#087443}
+    nav button.active{background:#315efb;color:white}@media(max-width:700px){.row{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main>
+  <section class="bar">
+    <h1>{{ _('AI client configuration') }}</h1>
+    <p class="muted">{{ _('Edit clients here, validate them with their real factories, then save and apply without restarting IIS.') }}</p>
+    <div class="actions"><button id="guidedTab">{{ _('Guided editor') }}</button><button id="yamlTab" class="secondary">{{ _('Advanced YAML') }}</button><button id="historyButton" class="secondary">{{ _('History') }}</button></div>
+  </section>
+  <section id="guided" class="card">
+    <h2>{{ _('Clients') }}</h2><div id="clients"></div>
+    <button id="addClient" class="secondary">{{ _('Add client') }}</button>
+    <h2>{{ _('Group concurrency limits') }}</h2>
+    <textarea id="limits" aria-label="{{ _('Group concurrency limits') }}"></textarea>
+  </section>
+  <section id="advanced" class="card" hidden>
+    <textarea id="yaml" class="yaml" aria-label="{{ _('YAML configuration') }}" translate="no"></textarea>
+  </section>
+  <section id="history" class="card" hidden><h2>{{ _('Saved versions') }}</h2><div id="versions"></div></section>
+  <section class="bar">
+    <div class="actions"><button id="validate">{{ _('Validate') }}</button><button id="save">{{ _('Save') }}</button>{% if apply_enabled %}<button id="apply">{{ _('Apply to running service') }}</button>{% endif %}<button id="reload" class="secondary">{{ _('Discard unsaved changes') }}</button></div>
+    <p class="muted">{{ _('Sensitive values are masked. Leave the mask unchanged to preserve the stored value. Every save creates a restorable backup.') }}</p>
+    <div id="status" class="status" hidden></div>
+  </section>
+</main>
+<script>
+const csrf={{ csrf_token|tojson }};
+const msg={loading:{{ _('Loading…')|tojson }},valid:{{ _('Configuration is valid.')|tojson }},saved:{{ _('Configuration was saved.')|tojson }},applied:{{ _('Configuration was applied to the running service.')|tojson }},badJson:{{ _('Factory parameters and group limits must be valid JSON.')|tojson }},factory:{{ _('Factory')|tojson }},name:{{ _('Name')|tojson }},group:{{ _('Group')|tojson }},tags:{{ _('Tags')|tojson }},enabled:{{ _('Enabled')|tojson }},parameters:{{ _('Factory parameters (JSON)')|tojson }},remove:{{ _('Remove client')|tojson }},restore:{{ _('Restore')|tojson }},restored:{{ _('The selected version was restored.')|tojson }},bytes:{{ _('bytes')|tojson }}};
+let state={}, factories=[], mode='guided';
+const $=id=>document.getElementById(id);
+const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function show(text,ok=true){$('status').hidden=false;$('status').className='status '+(ok?'good':'bad');$('status').textContent=text}
+async function api(path,options={}){options.headers={...(options.headers||{}),'Content-Type':'application/json','X-Config-CSRF':csrf};let r=await fetch(path,options),j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j}
+function extraOf(c){let x={...c};['factory','name','group','enable','tags'].forEach(k=>delete x[k]);return x}
+function card(c={factory:factories[0]||'',name:'',group:'',enable:true}){let box=document.createElement('div');box.className='client';box.innerHTML=`<div class="row"><label>${esc(msg.factory)}<select data-k="factory">${factories.map(f=>`<option ${f===c.factory?'selected':''}>${esc(f)}</option>`).join('')}<option ${factories.includes(c.factory)?'':'selected'}>${esc(c.factory||'')}</option></select></label><label>${esc(msg.name)}<input data-k="name"></label><label>${esc(msg.group)}<input data-k="group"></label><label>${esc(msg.tags)}<input data-k="tags" placeholder="low_sensitivity, strong"></label></div><label><input data-k="enable" type="checkbox" style="width:auto"> ${esc(msg.enabled)}</label><label>${esc(msg.parameters)}<textarea data-k="extra"></textarea></label><button class="danger" data-remove>${esc(msg.remove)}</button>`;box.querySelector('[data-k=name]').value=c.name||'';box.querySelector('[data-k=group]').value=c.group||'';box.querySelector('[data-k=tags]').value=(c.tags||[]).join(', ');box.querySelector('[data-k=enable]').checked=c.enable!==false;box.querySelector('[data-k=extra]').value=JSON.stringify(extraOf(c),null,2);box.querySelector('[data-remove]').onclick=()=>box.remove();$('clients').appendChild(box)}
+function render(){ $('clients').innerHTML='';(state.clients||[]).forEach(card);$('limits').value=JSON.stringify(state.group_limits||{},null,2);$('yaml').value=state.yaml||'' }
+function collect(){try{let clients=[...document.querySelectorAll('.client')].map(box=>{let q=k=>box.querySelector(`[data-k=${k}]`),x=JSON.parse(q('extra').value||'{}');return {...x,factory:q('factory').value.trim(),name:q('name').value.trim(),group:q('group').value.trim(),enable:q('enable').checked,tags:q('tags').value.split(',').map(x=>x.trim()).filter(Boolean)}});return {clients,group_limits:JSON.parse($('limits').value||'{}')}}catch(e){throw new Error(msg.badJson)}}
+async function load(){try{let j=await api('api/config');state={...j.data,yaml:j.yaml};factories=j.factories||[];render()}catch(e){show(e.message,false)}}
+function body(){return mode==='yaml'?{yaml:$('yaml').value}:{data:collect()}}
+$('addClient').onclick=()=>card();$('reload').onclick=load;
+$('guidedTab').onclick=()=>{mode='guided';$('guided').hidden=false;$('advanced').hidden=true;$('history').hidden=true};$('yamlTab').onclick=()=>{mode='yaml';$('guided').hidden=true;$('advanced').hidden=false;$('history').hidden=true};
+$('historyButton').onclick=async()=>{try{let j=await api('api/history');$('guided').hidden=true;$('advanced').hidden=true;$('history').hidden=false;$('versions').innerHTML='';j.items.forEach(v=>{let p=document.createElement('p');p.textContent=`${v.name} (${v.size} ${msg.bytes}) `;let b=document.createElement('button');b.textContent=msg.restore;b.onclick=async()=>{try{await api('api/restore',{method:'POST',body:JSON.stringify({name:v.name})});show(msg.restored);await load()}catch(e){show(e.message,false)}};p.appendChild(b);$('versions').appendChild(p)})}catch(e){show(e.message,false)}};
+$('validate').onclick=async()=>{try{await api('api/validate',{method:'POST',body:JSON.stringify(body())});show(msg.valid)}catch(e){show(e.message,false)}};
+$('save').onclick=async()=>{try{await api('api/save',{method:'POST',body:JSON.stringify(body())});show(msg.saved);await load()}catch(e){show(e.message,false)}};
+if($('apply'))$('apply').onclick=async()=>{try{await api('api/apply',{method:'POST',body:'{}'});show(msg.applied)}catch(e){show(e.message,false)}};
+load();
+</script></body></html>

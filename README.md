@@ -286,6 +286,21 @@ Client 健康恢复采用按需熔断策略：启动和空闲期间不发送测�
 > 配置示例见 [config/example.yaml](config/example.yaml) 末尾，冒烟测试见
 > [tests/manual_agent_harness.py](tests/manual_agent_harness.py)。
 
+## 配置页面
+
+AI Client 的配置校验和配置页面由本项目自身提供，不由 IIS 复制 schema：
+
+- 独立运行 `python -m AIClientCenter --config config/config.yaml`，访问 `/config/`；
+- 嵌入 IIS 时访问 `/monitor/ai-client-dashboard/config/`，并复用 IIS 登录保护；
+- 引导模式按 Client 卡片编辑公共字段，厂商特有参数使用 JSON；高级模式可编辑完整 YAML；
+- 校验会运行真实工厂构造和公共校验，但不会向模型发请求；
+- 保存前自动备份并原子替换文件，密钥字段在浏览器中遮蔽；
+- 保存后可将新配置原子热重载到当前 Manager，失败时保留原 Client 池。
+
+历史版本默认保存在配置文件同目录的 `.config-history/<文件名>/` 下。
+独立入口的配置编辑器只在本机监听时启用；`--allow-remote` 不会把写配置接口裸露到网络。
+需要远程使用时，应把 Blueprint 挂到带认证的宿主应用，IIS 嵌入模式即采用这种方式。
+
 ## 文件状态与历史代码
 
 完整文件索引、生产入口、手动/付费工具与历史原型的保留理由见

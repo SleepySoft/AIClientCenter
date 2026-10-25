@@ -16,9 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from AIClientCenter.factory_engine import (  # noqa: E402
-    build_manager, load_config, validate_config,
+    AIClientConfigReloader, build_manager, load_config, validate_config,
 )
 from AIClientCenter.core.observation import CallObservationSQLiteLogger  # noqa: E402
+from AIClientCenter.configuration import AIClientConfigurationService  # noqa: E402
 from AIClientCenter.web.dashboard import AIDashboardService  # noqa: E402
 
 
@@ -105,9 +106,19 @@ def main(argv=None) -> int:
             retention_days=args.observation_retention_days,
         )
     manager = build_manager(clients, group_limits, call_observer=observer)
+    editable_config_path = args.config or DEFAULT_CONFIG
+    manager.config_reloader = AIClientConfigReloader(manager, editable_config_path)
     manager.start_monitoring()
     dashboard = AIDashboardService(
-        manager, enable_manual_calls=not args.disable_manual_calls)
+        manager, enable_manual_calls=not args.disable_manual_calls,
+        config_reloader=manager.config_reloader,
+        # 远程裸 Flask 页面没有认证层；显式远程监听时不暴露写配置接口。
+        enable_config_editor=args.host in {"127.0.0.1", "localhost", "::1"},
+        configuration_service=AIClientConfigurationService(
+            editable_config_path,
+            fallback_path=(config_path if config_path != editable_config_path else None),
+        ),
+    )
     try:
         print(f"AIClientCenter 已启动: http://{args.host}:{args.port}/")
         dashboard.run_standalone(host=args.host, port=args.port)
