@@ -298,6 +298,12 @@ AI Client 的配置校验和配置页面由本项目自身提供，不由 IIS �
 - 保存后可将新配置原子热重载到当前 Manager，失败时保留原 Client 池。
 - 公共配置契约带有已审查的 UI 指纹；保留字段或顶层结构变化后，页面会报警告，测试也会失败。
 
+配置字段说明不写在网页模板中。公共字段由 `factory_metadata.py` 统一定义；工厂显式参数
+从 Python 签名自动发现，只接收 `**kwargs` 的 preset 继承其底层 builder 签名。Provider 或
+宿主自定义工厂可调用 `set_factory_metadata()` 补充扩展参数说明。Web 和未来 CLI 消费同一份
+`configuration_metadata`，把公共字段及所选工厂参数显示为可点击的帮助弹层；未登记但已存在
+于 YAML 的扩展参数会显示通用兜底说明。
+
 历史版本默认保存在配置文件同目录的 `.config-history/<文件名>/` 下。
 独立入口的配置编辑器只在本机监听时启用；`--allow-remote` 不会把写配置接口裸露到网络。
 需要远程使用时，应把 Blueprint 挂到带认证的宿主应用，IIS 嵌入模式即采用这种方式。

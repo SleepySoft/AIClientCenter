@@ -46,16 +46,26 @@ def builtin_factories() -> dict[str, ClientFactory]:
     """返回内置预置的新映射；调用者修改它不会影响其他引擎。"""
 
     from AIClientCenter.harness.cli import (
-        create_codex_preset, create_kimi_preset,
+        create_codex_client, create_codex_preset,
+        create_kimi_client, create_kimi_preset,
     )
-    from AIClientCenter.providers.gemini_free import create_gemini_free_preset
-    from AIClientCenter.providers.groq import create_groq_free_preset
-    from AIClientCenter.providers.nvidia import create_nvidia_free_preset
+    from AIClientCenter.providers.gemini_free import (
+        build_gemini_free_clients, create_gemini_free_preset)
+    from AIClientCenter.providers.groq import build_groq_clients, create_groq_free_preset
+    from AIClientCenter.providers.nvidia import build_nvidia_clients, create_nvidia_free_preset
     from AIClientCenter.providers.openai_clients import (
         create_openai_compatible_preset, create_self_rotating_openai_preset,
     )
-    from AIClientCenter.providers.openclaw import create_openclaw_preset
+    from AIClientCenter.providers.openclaw import create_openclaw_client, create_openclaw_preset
     from AIClientCenter.providers.zhipu import create_zhipu_preset
+    from AIClientCenter.factory_metadata import inherit_factory_metadata
+
+    inherit_factory_metadata(create_codex_preset, create_codex_client)
+    inherit_factory_metadata(create_kimi_preset, create_kimi_client)
+    inherit_factory_metadata(create_gemini_free_preset, build_gemini_free_clients)
+    inherit_factory_metadata(create_groq_free_preset, build_groq_clients)
+    inherit_factory_metadata(create_nvidia_free_preset, build_nvidia_clients)
+    inherit_factory_metadata(create_openclaw_preset, create_openclaw_client)
 
     return {
         "codex": create_codex_preset,

@@ -8,7 +8,7 @@ from typing import Callable, Optional
 from flask import Blueprint, Flask, jsonify, render_template, request, session
 
 from AIClientCenter.configuration import AIClientConfigurationService
-from AIClientCenter.factory_engine import ReloadInProgressError, builtin_factories
+from AIClientCenter.factory_engine import ReloadInProgressError
 
 
 class AIClientConfigurationWeb:
@@ -47,7 +47,9 @@ class AIClientConfigurationWeb:
         @protected
         def get_config():
             payload = self.service.read()
-            payload["factories"] = sorted(builtin_factories())
+            payload["configuration_metadata"] = self.service.metadata()
+            payload["factories"] = sorted(
+                payload["configuration_metadata"]["factories"])
             payload["apply_enabled"] = self.reloader is not None
             return jsonify(payload)
 

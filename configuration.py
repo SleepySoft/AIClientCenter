@@ -21,18 +21,22 @@ import yaml
 
 from AIClientCenter.core.manager import AIClientManager
 from AIClientCenter.factory_engine import RESERVED_FIELDS, load_config, validate_config
+from AIClientCenter.factory_engine import builtin_factories
+from AIClientCenter.factory_metadata import configuration_metadata
+from AIClientCenter.factory_metadata import METADATA_VERSION
 
 
 KEEP_SECRET = "__KEEP_EXISTING_SECRET__"
 _SECRET_KEY = re.compile(r"(?:password|passwd|secret|token|api[_-]?key)$", re.I)
 REVIEWED_AI_CONFIG_SCHEMA_SHA256 = (
-    "a72233cffb2a7ffae3d5f242ac3b7af8d34293d1f441c6c8191a1b1da76bd052")
+    "8a977a16795ae5f69c5bf60854933fb8ee0bb68b179151d2816de1be8fbb75dc")
 
 
 def schema_ui_contract() -> dict[str, Any]:
     contract = {
         "top_level": ["clients", "group_limits"],
         "reserved_fields": sorted(RESERVED_FIELDS),
+        "metadata_version": METADATA_VERSION,
     }
     encoded = json.dumps(
         contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -117,6 +121,11 @@ class AIClientConfigurationService:
             "schema_ui_contract": schema_ui_contract(),
             "keep_secret_sentinel": KEEP_SECRET,
         }
+
+    def metadata(self) -> dict[str, Any]:
+        factories = builtin_factories() if self.include_builtins else {}
+        factories.update(dict(self.factories or {}))
+        return configuration_metadata(factories)
 
     def validate_data(self, data: Mapping[str, Any]) -> dict[str, Any]:
         raw = dict(data)
