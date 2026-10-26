@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 import shutil
 import tempfile
 import threading
@@ -18,11 +20,30 @@ from typing import Any, Mapping
 import yaml
 
 from AIClientCenter.core.manager import AIClientManager
-from AIClientCenter.factory_engine import load_config, validate_config
+from AIClientCenter.factory_engine import RESERVED_FIELDS, load_config, validate_config
 
 
 KEEP_SECRET = "__KEEP_EXISTING_SECRET__"
 _SECRET_KEY = re.compile(r"(?:password|passwd|secret|token|api[_-]?key)$", re.I)
+REVIEWED_AI_CONFIG_SCHEMA_SHA256 = (
+    "a72233cffb2a7ffae3d5f242ac3b7af8d34293d1f441c6c8191a1b1da76bd052")
+
+
+def schema_ui_contract() -> dict[str, Any]:
+    contract = {
+        "top_level": ["clients", "group_limits"],
+        "reserved_fields": sorted(RESERVED_FIELDS),
+    }
+    encoded = json.dumps(
+        contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    actual = hashlib.sha256(encoded).hexdigest()
+    compatible = actual == REVIEWED_AI_CONFIG_SCHEMA_SHA256
+    return {
+        "compatible": compatible,
+        "reviewed_sha256": REVIEWED_AI_CONFIG_SCHEMA_SHA256,
+        "actual_sha256": actual,
+        "warning": None if compatible else "schema_ui_review_required",
+    }
 
 
 def _load_yaml_text(text: str) -> dict[str, Any]:
@@ -82,11 +103,18 @@ class AIClientConfigurationService:
         with self._lock:
             raw = self._read_current()
         public = _redact(raw)
+        explicit = os.environ.get("AI_CLIENT_CONFIG", "").strip()
+        selected_by = (
+            "AI_CLIENT_CONFIG"
+            if explicit and Path(explicit).expanduser().resolve() == self.config_path
+            else "explicit_argument")
         return {
             "path": str(self.config_path),
+            "selected_by": selected_by,
             "data": public,
             "yaml": yaml.safe_dump(public, allow_unicode=True, sort_keys=False),
             "exists": self.config_path.is_file(),
+            "schema_ui_contract": schema_ui_contract(),
             "keep_secret_sentinel": KEEP_SECRET,
         }
 
