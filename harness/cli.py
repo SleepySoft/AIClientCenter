@@ -595,16 +595,15 @@ class KimiCLIClient(AgentCLIClient):
     """
     Kimi Code CLI 客户端。
 
-    验证环境：kimi 1.37.0（Windows）。
+    验证环境：旧版 kimi 1.37.0（Windows）与 Kimi Code 2.6.0（Linux）。
 
     无状态调用：
-        kimi --quiet [-m model] [-w workdir]
-        （Prompt 通过 stdin 传入；--quiet = --print --output-format text --final-message-only）
+        旧版：kimi --quiet [-m model] [-w workdir]（Prompt 通过 stdin 传入）
+        2.x：kimi --output-format stream-json --prompt <prompt>
 
     会话续接：
-        kimi --quiet --session <uuid> ...
-        Kimi 对不存在的 session ID 会自动创建新会话，因此会话 ID 由本类生成 UUID，
-        首次调用与续接走同一条命令路径。
+        旧版：kimi --quiet --session <uuid>
+        2.x：kimi --output-format stream-json --session <session_id> --prompt <prompt>
 
     退出码（官方文档）：
         0  成功
@@ -622,25 +621,65 @@ class KimiCLIClient(AgentCLIClient):
     STDIN_ENCODING = locale.getpreferredencoding(False) or 'utf-8'
     STDOUT_ENCODING = STDIN_ENCODING
 
+    PROTOCOL_AUTO = 'auto'
+    PROTOCOL_LEGACY = 'legacy'
+    PROTOCOL_KIMI_CODE = 'kimi-code'
+
     def __init__(self, name: str, cli_command: str = 'kimi',
-                 max_steps_per_turn: Optional[int] = None, **kwargs):
+                 max_steps_per_turn: Optional[int] = None,
+                 cli_protocol: str = PROTOCOL_AUTO, **kwargs):
         self.max_steps_per_turn = max_steps_per_turn
         super().__init__(name=name, cli_command=cli_command, **kwargs)
-        if self.mode == MODE_SESSION and not self._session_id:
+        if cli_protocol == self.PROTOCOL_AUTO:
+            cli_protocol = self._detect_cli_protocol()
+        if cli_protocol not in (self.PROTOCOL_LEGACY, self.PROTOCOL_KIMI_CODE):
+            raise ValueError(
+                "cli_protocol 必须是 'auto'、'legacy' 或 'kimi-code'")
+        self.cli_protocol = cli_protocol
+        if (self.cli_protocol == self.PROTOCOL_LEGACY
+                and self.mode == MODE_SESSION and not self._session_id):
             # Kimi 允许外部指定 session ID，提前生成，首调即绑定
             self._session_id = self._new_session_id()
 
+    def _detect_cli_protocol(self) -> str:
+        """区分旧 kimi-cli 与新 Kimi Code。
+
+        只读取 ``--help``，不会创建会话或消耗模型额度。
+        检测失败时保持旧协议，与历史配置兼容。
+        """
+        try:
+            result = subprocess.run(
+                self._wrap_command(['--help']),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.work_dir if os.path.isdir(self.work_dir) else None,
+                env=self._build_env(),
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
+            output = (result.stdout + result.stderr).decode(
+                self.STDOUT_ENCODING, errors='replace')
+            if '--prompt <prompt>' in output and 'stream-json' in output:
+                return self.PROTOCOL_KIMI_CODE
+        except (OSError, subprocess.SubprocessError):
+            logger.warning('[%s] 无法检测 Kimi CLI 协议，回退 legacy', self.name)
+        return self.PROTOCOL_LEGACY
+
     def _common_args(self, model: Optional[str]) -> List[str]:
-        args = ['--quiet', '-w', self.work_dir]
+        if self.cli_protocol == self.PROTOCOL_KIMI_CODE:
+            args = ['--output-format', 'stream-json']
+        else:
+            args = ['--quiet', '-w', self.work_dir]
         if model:
             args += ['-m', model]
-        if self.max_steps_per_turn:
+        if self.max_steps_per_turn and self.cli_protocol == self.PROTOCOL_LEGACY:
             args += ['--max-steps-per-turn', str(self.max_steps_per_turn)]
         return args
 
     def _build_exec_command(self, model: Optional[str], final_text_file: Optional[str]) -> List[str]:
         args = self._common_args(model)
-        if self.mode == MODE_SESSION and self._session_id:
+        if (self.cli_protocol == self.PROTOCOL_LEGACY
+                and self.mode == MODE_SESSION and self._session_id):
             args += ['--session', self._session_id]
         return args
 
@@ -648,9 +687,31 @@ class KimiCLIClient(AgentCLIClient):
                               final_text_file: Optional[str]) -> List[str]:
         return self._common_args(model) + ['--session', session_id]
 
+    def _run_cli(self, args: List[str], prompt: str,
+                 final_text_file: Optional[str]) -> Tuple[Optional[int], str, str]:
+        if self.cli_protocol == self.PROTOCOL_KIMI_CODE:
+            # Kimi Code 2.x 不再从 stdin 读取 prompt；Linux 的 ARG_MAX
+            # 足以容纳 IIS 当前的单次 Prompt。
+            return super()._run_cli(args + ['--prompt', prompt], '', final_text_file)
+        return super()._run_cli(args, prompt, final_text_file)
+
     def _parse_output(self, stdout: str, stderr: str,
                       final_text_file: Optional[str]) -> Tuple[str, Dict[str, int], Optional[str]]:
-        # --quiet 模式下 stdout 即最终消息；usage 不上报，由基类估算
+        if self.cli_protocol == self.PROTOCOL_KIMI_CODE:
+            assistant_text = ''
+            session_id = self._session_id
+            for line in stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get('role') == 'assistant' and event.get('content'):
+                    assistant_text = str(event['content']).strip()
+                if event.get('type') == 'session.resume_hint' and event.get('session_id'):
+                    session_id = str(event['session_id'])
+            return assistant_text, {}, session_id
+
+        # 旧版 --quiet 模式下 stdout 即最终消息；usage 不上报，由基类估算
         return stdout.strip(), {}, self._session_id
 
     def _classify_error(self, exit_code: Optional[int], stdout: str, stderr: str) -> Dict[str, Any]:

@@ -1,4 +1,4 @@
-from AIClientCenter.harness.cli import CodexCLIClient
+from AIClientCenter.harness.cli import CodexCLIClient, KimiCLIClient
 from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 
 
@@ -37,6 +37,37 @@ def test_codex_jsonl_bad_request_is_not_misclassified_by_request_id_text():
 
     assert error["type"] == "BAD_REQUEST"
     assert error["code"] == "HTTP_400"
+
+
+def test_kimi_code_stream_json_parser_extracts_clean_text_and_session():
+    client = KimiCLIClient(
+        name="kimi-test", cli_command="kimi", cli_protocol="kimi-code")
+    stdout = "\n".join([
+        '{"role":"meta","type":"system.version","version":"2.6.0"}',
+        '{"role":"assistant","content":"final answer"}',
+        ('{"role":"meta","type":"session.resume_hint",'
+         '"session_id":"session-123"}'),
+    ])
+
+    text, usage, session_id = client._parse_output(stdout, "", None)
+
+    assert text == "final answer"
+    assert usage == {}
+    assert session_id == "session-123"
+
+
+def test_kimi_code_commands_use_prompt_protocol_without_legacy_flags():
+    client = KimiCLIClient(
+        name="kimi-test", cli_command="kimi", cli_protocol="kimi-code",
+        mode="stateless", model="kimi-model")
+
+    command = client._build_exec_command("kimi-model", None)
+
+    assert command == [
+        "--output-format", "stream-json", "-m", "kimi-model",
+    ]
+    assert "--quiet" not in command
+    assert "-w" not in command
 
 
 class _Response:
