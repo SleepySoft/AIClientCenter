@@ -58,18 +58,33 @@ def test_kimi_code_stream_json_parser_extracts_clean_text_and_session():
     assert session_id == "session-123"
 
 
-def test_kimi_code_commands_use_prompt_protocol_without_legacy_flags():
+def test_kimi_code_commands_use_prompt_protocol_without_legacy_flags(tmp_path):
+    agent_file = tmp_path / "json-agent.md"
+    agent_file.write_text("---\ndescription: test\ntools: []\n---\ntest")
     client = KimiCLIClient(
         name="kimi-test", cli_command="kimi", cli_protocol="kimi-code",
-        mode="stateless", model="kimi-model")
+        mode="stateless", model="kimi-model", agent_file=str(agent_file))
 
     command = client._build_exec_command("kimi-model", None)
 
     assert command == [
-        "--output-format", "stream-json", "-m", "kimi-model",
+        "--output-format", "stream-json",
+        "--agent-file", str(agent_file), "-m", "kimi-model",
     ]
     assert "--quiet" not in command
     assert "-w" not in command
+
+
+def test_kimi_resume_does_not_repeat_agent_file(tmp_path):
+    agent_file = tmp_path / "json-agent.md"
+    agent_file.write_text("---\ndescription: test\ntools: []\n---\ntest")
+    client = KimiCLIClient(
+        name="kimi-test", cli_command="kimi", cli_protocol="kimi-code",
+        mode="session", agent_file=str(agent_file))
+
+    command = client._build_resume_command("session-1", None, None)
+
+    assert command == ["--output-format", "stream-json", "--session", "session-1"]
 
 
 def test_kimi_code_replaces_nul_before_passing_prompt_in_argv():

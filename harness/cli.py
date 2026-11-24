@@ -633,7 +633,8 @@ class KimiCLIClient(AgentCLIClient):
 
     def __init__(self, name: str, cli_command: str = 'kimi',
                  max_steps_per_turn: Optional[int] = None,
-                 cli_protocol: str = PROTOCOL_AUTO, **kwargs):
+                 cli_protocol: str = PROTOCOL_AUTO,
+                 agent_file: Optional[str] = None, **kwargs):
         self.max_steps_per_turn = max_steps_per_turn
         super().__init__(name=name, cli_command=cli_command, **kwargs)
         if cli_protocol == self.PROTOCOL_AUTO:
@@ -642,6 +643,13 @@ class KimiCLIClient(AgentCLIClient):
             raise ValueError(
                 "cli_protocol 必须是 'auto'、'legacy' 或 'kimi-code'")
         self.cli_protocol = cli_protocol
+        if agent_file and self.cli_protocol != self.PROTOCOL_KIMI_CODE:
+            raise ValueError("agent_file 仅支持 Kimi Code 2.x 协议")
+        self.agent_file = (
+            os.path.abspath(os.path.expanduser(agent_file)) if agent_file else None
+        )
+        if self.agent_file and not os.path.isfile(self.agent_file):
+            raise ValueError(f"Kimi agent_file 不存在: {self.agent_file}")
         if (self.cli_protocol == self.PROTOCOL_LEGACY
                 and self.mode == MODE_SESSION and not self._session_id):
             # Kimi 允许外部指定 session ID，提前生成，首调即绑定
@@ -671,9 +679,11 @@ class KimiCLIClient(AgentCLIClient):
             logger.warning('[%s] 无法检测 Kimi CLI 协议，回退 legacy', self.name)
         return self.PROTOCOL_LEGACY
 
-    def _common_args(self, model: Optional[str]) -> List[str]:
+    def _common_args(self, model: Optional[str], *, include_agent: bool = True) -> List[str]:
         if self.cli_protocol == self.PROTOCOL_KIMI_CODE:
             args = ['--output-format', 'stream-json']
+            if include_agent and self.agent_file:
+                args += ['--agent-file', self.agent_file]
         else:
             args = ['--quiet', '-w', self.work_dir]
         if model:
@@ -691,7 +701,8 @@ class KimiCLIClient(AgentCLIClient):
 
     def _build_resume_command(self, session_id: str, model: Optional[str],
                               final_text_file: Optional[str]) -> List[str]:
-        return self._common_args(model) + ['--session', session_id]
+        # Kimi Code 恢复会话时 Agent 已绑定，且 --agent-file 与 --session 互斥。
+        return self._common_args(model, include_agent=False) + ['--session', session_id]
 
     def _run_cli(self, args: List[str], prompt: str,
                  final_text_file: Optional[str]) -> Tuple[Optional[int], str, str]:
