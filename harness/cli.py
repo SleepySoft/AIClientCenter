@@ -86,6 +86,7 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
     #: Node 系 CLI（codex）恒为 utf-8；Python 系 CLI（kimi）随系统 locale（如 cp936）。
     STDIN_ENCODING = 'utf-8'
     STDOUT_ENCODING = 'utf-8'
+    LOCAL_EXECUTION_ERROR = -1
 
     def __init__(
             self,
@@ -191,6 +192,9 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
         if exit_code is None:
             return {'type': 'TRANSIENT_NETWORK', 'code': 'CONNECTION_TIMEOUT',
                     'message': 'CLI process timed out.'}
+        if exit_code == self.LOCAL_EXECUTION_ERROR:
+            return {'type': 'TRANSIENT_SERVER', 'code': 'LOCAL_EXECUTION_ERROR',
+                    'message': f'CLI process could not be started. {stderr[:200]}'}
         if '429' in blob or 'rate limit' in blob or 'too many requests' in blob:
             return {'type': 'TRANSIENT_SERVER', 'code': 'HTTP_429',
                     'message': f'Rate limited. {stderr[:200]}'}
@@ -235,7 +239,9 @@ class AgentCLIClient(ClientMetricsMixin, BaseAIClient):
             return 127, '', f'CLI not found: {e}'
         except Exception as e:
             logger.exception(f'[{self.name}] CLI execution failed')
-            return 1, '', f'CLI execution exception: {e}'
+            # 本地进程创建异常不等于 CLI 自己返回退出码 1。后者对部分 CLI
+            # 表示认证/配置永久错误，混用会导致一次脏输入把 Client 永久隔离。
+            return self.LOCAL_EXECUTION_ERROR, '', f'CLI execution exception: {e}'
 
     # -------------------------------------- 会话管理 --------------------------------------
 
@@ -692,7 +698,10 @@ class KimiCLIClient(AgentCLIClient):
         if self.cli_protocol == self.PROTOCOL_KIMI_CODE:
             # Kimi Code 2.x 不再从 stdin 读取 prompt；Linux 的 ARG_MAX
             # 足以容纳 IIS 当前的单次 Prompt。
-            return super()._run_cli(args + ['--prompt', prompt], '', final_text_file)
+            # execve 参数不能包含 NUL；公开网页正文偶尔会夹带该控制字符。
+            # 替换而非删除，以免意外拼接原本由 NUL 分隔的文本片段。
+            argv_prompt = prompt.replace('\x00', '\ufffd')
+            return super()._run_cli(args + ['--prompt', argv_prompt], '', final_text_file)
         return super()._run_cli(args, prompt, final_text_file)
 
     def _parse_output(self, stdout: str, stderr: str,

@@ -8,9 +8,8 @@ from typing import Optional, Callable, Any
 from flask import Flask, Blueprint, jsonify, request, Response
 
 
-from AIClientCenter.core.metrics import ClientMetricsMixin
 from AIClientCenter.core.manager import (
-    AIClientManager, ClientStatus, BaseAIClient, CLIENT_PRIORITY_NORMAL,
+    AIClientManager, ClientStatus,
 )
 from AIClientCenter.web.observation_page import OBSERVATION_HTML
 from AIClientCenter.factory_engine import ReloadInProgressError
@@ -267,7 +266,15 @@ FRONTEND_HTML = r"""
 
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             <div class="flex flex-col space-y-1">
-                                <span class="text-gray-600">Quality: <b>{{ client.feedback_stats.quality_score }}%</b></span>
+                                <span class="text-gray-600">Routing signal: <b>{{ client.feedback_stats.quality_score }}%</b></span>
+                                <span class="text-gray-600" v-if="client.validation24h && client.validation24h.first_pass_rate != null">
+                                    24h first pass: <b>{{ (client.validation24h.first_pass_rate * 100).toFixed(1) }}%</b>
+                                    <span class="text-gray-400">({{ client.validation24h.first_pass_count }})</span>
+                                </span>
+                                <span class="text-gray-600" v-if="client.validation24h && client.validation24h.final_success_rate != null">
+                                    24h final success: <b>{{ (client.validation24h.final_success_rate * 100).toFixed(1) }}%</b>
+                                    <span class="text-gray-400">({{ client.validation24h.final_count }})</span>
+                                </span>
                                 <span class="text-gray-600">
                                     Valid: <b class="text-green-600">{{ client.feedback_stats.success_count }}</b>
                                     / Invalid: <b :class="{'text-red-600': client.feedback_stats.failure_count > 0}">{{ client.feedback_stats.failure_count }}</b>
@@ -1762,6 +1769,7 @@ class AIDashboardService:
             # 持久观测库的近 24h 数据：runtime_stats 是进程内计数，重启归零；
             # recent24h 来自 ai_calls 表，跨重启保留，供卡片展示“窗口期真实量”。
             recent24h = {}
+            validation24h = {}
             observer = (
                 self.manager.get_call_observer()
                 if hasattr(self.manager, "get_call_observer") else None
@@ -1775,6 +1783,8 @@ class AIDashboardService:
                         name = row.get("client_name")
                         if name:
                             recent24h[str(name)] = row
+                    validation24h = observer.summarize_validation_quality(
+                        since_ts=until_ts - 24 * 3600, until_ts=until_ts)
                 except Exception:
                     logger.exception("Failed to load 24h observation summary")
 
@@ -1793,6 +1803,7 @@ class AIDashboardService:
 
                 client_data['meta']['current_model'] = model_info
                 client_data['recent24h'] = recent24h.get(str(c_name))
+                client_data['validation24h'] = validation24h.get(str(c_name))
 
             serializable_stats = self._make_json_serializable(raw_stats)
             return jsonify(serializable_stats)

@@ -147,3 +147,31 @@ def test_observer_summarizes_by_safe_dimensions(tmp_path):
     assert summary[0]["cached_input_tokens"] == 8
     assert summary[0]["uncached_input_tokens"] == 4
     assert summary[0]["feedback_valid_rate"] == 1.0
+
+
+def test_observer_summarizes_first_pass_and_final_analysis_success(tmp_path):
+    observer = CallObservationSQLiteLogger(str(tmp_path / "observations.sqlite3"))
+    clients = [ObservedClient(), ObservedClient()]
+    clients[0].name = "first-client"
+    clients[1].name = "retry-client"
+    request_ids = []
+    for client in clients:
+        observer.attach_client(client)
+        response = client.chat([{"role": "user", "content": "hello"}])
+        request_ids.append(response["_ai_client_meta"]["request_id"])
+
+    observer.feedback(request_ids[0], valid=False, labels={
+        "stage": "event_v4_validation", "attempt": 1,
+        "analysis_run_id": "run-1",
+    })
+    observer.feedback(request_ids[1], valid=True, labels={
+        "stage": "event_v4_validation", "attempt": 2,
+        "analysis_run_id": "run-1",
+    })
+
+    quality = observer.summarize_validation_quality()
+
+    assert quality["first-client"]["first_pass_rate"] == 0.0
+    assert quality["first-client"]["final_success_rate"] == 1.0
+    assert quality["retry-client"]["first_pass_rate"] is None
+    assert quality["retry-client"]["final_success_rate"] == 1.0

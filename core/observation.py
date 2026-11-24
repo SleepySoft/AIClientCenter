@@ -293,6 +293,81 @@ class CallObservationSQLiteLogger:
             result.append(item)
         return result
 
+    def summarize_validation_quality(
+            self,
+            *,
+            since_ts: Optional[float] = None,
+            until_ts: Optional[float] = None,
+    ) -> dict[str, dict[str, Any]]:
+        """按 Client 汇总 Event V4 的首过率与分析链最终成功率。"""
+
+        where, params = _time_filter(since_ts, until_ts)
+        conjunction = " AND " if where else " WHERE "
+        event_filter = (
+            f"{where}{conjunction}feedback_valid IS NOT NULL "
+            "AND json_extract(feedback_json, '$.stage') = 'event_v4_validation'"
+        )
+        query = f"""
+            WITH validation AS (
+                SELECT client_name, feedback_valid,
+                       CAST(json_extract(feedback_json, '$.attempt') AS INTEGER) AS attempt,
+                       json_extract(feedback_json, '$.analysis_run_id') AS run_id
+                FROM ai_calls{event_filter}
+            ),
+            per_client AS (
+                SELECT client_name,
+                       SUM(CASE WHEN attempt = 1 THEN 1 ELSE 0 END) AS first_pass_count,
+                       SUM(CASE WHEN attempt = 1 THEN feedback_valid ELSE 0 END)
+                           AS first_pass_success_count,
+                       COUNT(*) AS attempt_count,
+                       SUM(feedback_valid) AS attempt_success_count
+                FROM validation
+                GROUP BY client_name
+            ),
+            run_outcomes AS (
+                SELECT run_id, MAX(feedback_valid) AS succeeded
+                FROM validation
+                WHERE run_id IS NOT NULL AND run_id != ''
+                GROUP BY run_id
+            ),
+            client_runs AS (
+                SELECT DISTINCT client_name, run_id
+                FROM validation
+                WHERE run_id IS NOT NULL AND run_id != ''
+            ),
+            final_by_client AS (
+                SELECT client_runs.client_name,
+                       COUNT(*) AS final_count,
+                       SUM(run_outcomes.succeeded) AS final_success_count
+                FROM client_runs
+                JOIN run_outcomes USING (run_id)
+                GROUP BY client_runs.client_name
+            )
+            SELECT per_client.*,
+                   COALESCE(final_by_client.final_count, 0) AS final_count,
+                   COALESCE(final_by_client.final_success_count, 0)
+                       AS final_success_count
+            FROM per_client
+            LEFT JOIN final_by_client USING (client_name)
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            first_count = int(item["first_pass_count"] or 0)
+            first_success = int(item["first_pass_success_count"] or 0)
+            final_count = int(item["final_count"] or 0)
+            final_success = int(item["final_success_count"] or 0)
+            item["first_pass_rate"] = (
+                first_success / first_count if first_count else None
+            )
+            item["final_success_rate"] = (
+                final_success / final_count if final_count else None
+            )
+            result[str(item.pop("client_name"))] = item
+        return result
+
 
 def _time_filter(
         since_ts: Optional[float], until_ts: Optional[float],

@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from AIClientCenter.harness.cli import CodexCLIClient, KimiCLIClient
 from AIClientCenter.providers.openai_compatible import OpenAICompatibleAPI
 
@@ -68,6 +70,34 @@ def test_kimi_code_commands_use_prompt_protocol_without_legacy_flags():
     ]
     assert "--quiet" not in command
     assert "-w" not in command
+
+
+def test_kimi_code_replaces_nul_before_passing_prompt_in_argv():
+    client = KimiCLIClient(
+        name="kimi-test", cli_command="kimi", cli_protocol="kimi-code")
+
+    with patch("AIClientCenter.harness.cli.subprocess.run") as run:
+        run.return_value.returncode = 0
+        run.return_value.stdout = b'{"role":"assistant","content":"ok"}\n'
+        run.return_value.stderr = b''
+        client._run_cli([], "left\x00right", None)
+
+    command = run.call_args.args[0]
+    assert command[-2:] == ["--prompt", "left\ufffdright"]
+
+
+def test_kimi_local_spawn_error_is_transient_not_permanent():
+    client = KimiCLIClient(
+        name="kimi-test", cli_command="kimi", cli_protocol="kimi-code")
+
+    with patch(
+            "AIClientCenter.harness.cli.subprocess.run",
+            side_effect=ValueError("bad argv")):
+        exit_code, stdout, stderr = client._run_cli([], "prompt", None)
+
+    error = client._classify_error(exit_code, stdout, stderr)
+    assert error["type"] == "TRANSIENT_SERVER"
+    assert error["code"] == "LOCAL_EXECUTION_ERROR"
 
 
 class _Response:
